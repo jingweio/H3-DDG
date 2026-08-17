@@ -4,7 +4,7 @@
 #SBATCH --gres=gpu:a100:1
 #SBATCH --cpus-per-task=12
 #SBATCH --mem=128G
-#SBATCH --time=36:00:00
+#SBATCH --time=23:00:00
 #SBATCH --output=/ibex/user/guoj0f/H3-DDG/reproduce/ibex-records/bindingGYM-reproduce/bindinggym_interassay_5fold_20260817-092000_f%a_%A.out
 #SBATCH --error=/ibex/user/guoj0f/H3-DDG/reproduce/ibex-records/bindingGYM-reproduce/bindinggym_interassay_5fold_20260817-092000_f%a_%A.err
 

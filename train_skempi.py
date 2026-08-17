@@ -52,9 +52,13 @@ def collect_results(model, dataloader, device):
     return pd.DataFrame(results), np.mean(val_loss_list)
 
 
-def train(max_iter, device='cpu', cv_mgr=None, dataloader=None, log_file=None, save_dir=None, args=None):
-    """ Train the model across multiple cross-validation folds. """
-    for fold in range(args.num_cvfolds):
+def train(max_iter, device='cpu', cv_mgr=None, dataloader=None, log_file=None, save_dir=None, args=None, folds=None):
+    """ Train the model across multiple cross-validation folds.
+
+    `folds` restricts training to a subset of folds (used by the one-job-per-fold split; see
+    --fold). When None the behaviour is unchanged: all args.num_cvfolds folds, in order.
+    """
+    for fold in (range(args.num_cvfolds) if folds is None else folds):
         model, optimizer, _ = cv_mgr.get(fold)
         model.to(device)
         print(f"\033[0;30;43m{time.strftime('%Y-%m-%d %H-%M-%S')} | [train] Fold {fold}\033[0m")
@@ -90,10 +94,16 @@ def train(max_iter, device='cpu', cv_mgr=None, dataloader=None, log_file=None, s
         torch.cuda.empty_cache()
 
 
-def validate(save=False, device='cpu', cv_mgr=None, dataloader=None, log_file=None, save_dir=None):
-    """ Validate the model across all folds and compute metrics. """
+def validate(save=False, device='cpu', cv_mgr=None, dataloader=None, log_file=None, save_dir=None, folds=None):
+    """ Validate the model across all folds and compute metrics.
+
+    `folds` restricts validation to a subset (one-job-per-fold split; see --fold). In that mode
+    only the trained fold's own model exists, so results are written per fold and the 3-fold
+    combination is produced afterwards by validate_all.py over the shared save_dir.
+    """
+    fold_list = list(range(args.num_cvfolds)) if folds is None else list(folds)
     all_results = []
-    for fold in range(args.num_cvfolds):
+    for fold in fold_list:
         model, _, _ = cv_mgr.get(fold)
         model.to(device)
         results, _ = collect_results(model, dataloader.get_val_loader(fold), device)
@@ -103,7 +113,8 @@ def validate(save=False, device='cpu', cv_mgr=None, dataloader=None, log_file=No
     results = pd.concat(all_results)
     results['method'] = 'BA-DDG'
     if save:
-        results_path = os.path.join(save_dir, 'results.csv')
+        suffix = '' if folds is None else f'_fold{fold_list[0]}'
+        results_path = os.path.join(save_dir, f'results{suffix}.csv')
         results.to_csv(results_path, index=False)
         print(results_path)
 
@@ -164,21 +175,42 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser(description="Train or infer with BA-DDG model.")
     parser.add_argument('--config_path', type=str, default="../config/inference_ba-cycle_skempi.json", help="Path to configuration JSON file.")
     parser.add_argument('--tag', type=str, default='', help="Tag for the experiment.")
-    args = parser.parse_args()
-    param_s = args.__dict__
-    param = json.loads(open(args.config_path, 'r').read())
-    param['tag'] = args.tag
+    # --- one-job-per-fold split (added for Ibex scheduling; see ibex-records/bindingGYM-reproduce) ---
+    # A single 3-fold job needs a 48h walltime, which excludes it from Ibex's gpu24 partition
+    # (24h limit, 32 a100 nodes -- the largest pool) and pushed its estimated start out by 3 days.
+    # The 3 folds are fully independent (CrossValidation holds a separate model/optimizer per fold
+    # and train() never crosses them), so each can be its own <24h job running in parallel.
+    parser.add_argument('--fold', type=int, default=None,
+                        help="Train/validate ONLY this fold. Omit for the original all-folds behaviour.")
+    parser.add_argument('--save_dir', type=str, default=None,
+                        help="Reuse an existing results dir (the 3 per-fold jobs SHARE one so that "
+                             "validate_all.py can later combine their fold*_its*_results.csv).")
+    cli = parser.parse_args()
+    param = json.loads(open(cli.config_path, 'r').read())
+    param['tag'] = cli.tag
     args = argparse.Namespace(**param)
 
     set_seed(args.seed)
 
+    folds = None if cli.fold is None else [cli.fold]
+    if folds is not None:
+        assert 0 <= cli.fold < args.num_cvfolds, f'--fold {cli.fold} out of range'
+
     # Setup directories and logging
-    timestamp = time.strftime("%Y-%m-%d-%H-%M-%S") + f"-%3d" % ((time.time() - int(time.time())) * 1000)
-    save_dir = os.path.join('./results/', timestamp + f"_{args.tag}")
-    check_dir(os.path.join(save_dir, 'checkpoint'))
-    log_file = open(os.path.join(save_dir, "train_log.txt"), 'a+')
-    with open(os.path.join(save_dir, 'train_config.json'), 'w') as fout:
-        json.dump(args.__dict__, fout, indent=2)
+    if cli.save_dir is not None:
+        save_dir = cli.save_dir
+        # NOTE: check_dir(overwrite=True) does shutil.rmtree -- with a SHARED save_dir that would
+        # wipe a sibling fold's already-finished checkpoints. Never use it here.
+        os.makedirs(os.path.join(save_dir, 'checkpoint'), exist_ok=True)
+    else:
+        timestamp = time.strftime("%Y-%m-%d-%H-%M-%S") + f"-%3d" % ((time.time() - int(time.time())) * 1000)
+        save_dir = os.path.join('./results/', timestamp + f"_{args.tag}")
+        check_dir(os.path.join(save_dir, 'checkpoint'))
+    stem = 'train' if folds is None else f'train_fold{cli.fold}'
+    log_file = open(os.path.join(save_dir, f"{stem}_log.txt"), 'a+')
+    with open(os.path.join(save_dir, f'{stem}_config.json'), 'w') as fout:
+        json.dump({**args.__dict__, 'fold': cli.fold, 'save_dir': save_dir}, fout, indent=2)
+    print(f'save_dir = {save_dir} | fold = {cli.fold if cli.fold is not None else "all"}')
 
     print('Loading datasets...')
     dataloader = SkempiDatasetManager(config=args, num_cvfolds=args.num_cvfolds, num_workers=16)
@@ -194,8 +226,10 @@ if __name__ == '__main__':
 
     # Execute training or inference based on experiment type
     if args.ex_type == "inference":
-        metrics = validate(save=True, device=device, cv_mgr=cv_mgr, dataloader=dataloader, log_file=log_file, save_dir=save_dir)
+        metrics = validate(save=True, device=device, cv_mgr=cv_mgr, dataloader=dataloader, log_file=log_file, save_dir=save_dir, folds=folds)
     elif args.ex_type == "train":
-        train(max_iter=args.max_iter, device=device, cv_mgr=cv_mgr, dataloader=dataloader, log_file=log_file, save_dir=save_dir, args=args)
-        torch.save(cv_mgr.state_dict(), os.path.join(save_dir, 'checkpoint', 'ddg_model.ckpt'))
-        metrics = validate(save=True, device=device, cv_mgr=cv_mgr, dataloader=dataloader, log_file=log_file, save_dir=save_dir)
+        train(max_iter=args.max_iter, device=device, cv_mgr=cv_mgr, dataloader=dataloader, log_file=log_file, save_dir=save_dir, args=args, folds=folds)
+        ckpt_name = 'ddg_model.ckpt' if folds is None else f'ddg_model_fold{cli.fold}.ckpt'
+        torch.save(cv_mgr.state_dict(), os.path.join(save_dir, 'checkpoint', ckpt_name))
+        metrics = validate(save=True, device=device, cv_mgr=cv_mgr, dataloader=dataloader, log_file=log_file, save_dir=save_dir, folds=folds)
+    print('DONE')
