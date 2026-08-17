@@ -5,3 +5,7 @@ __pypackages__/
 wandb/
 data/
 results/
+
+# ibex job logs
+ibex-records/**/*.out
+ibex-records/**/*.err
