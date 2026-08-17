@@ -116,6 +116,12 @@ def main():
     args = argparse.Namespace(**param)
     set_seed(args.seed)
 
+    # Announce the resolved GPU on the first line of every run. nvidia-smi numbers by PCI bus and
+    # CUDA defaults to FASTEST_FIRST, which on this workstation is the exact reverse -- so a
+    # mis-picked device is otherwise invisible except as "seems slow".
+    if torch.cuda.is_available():
+        print(f'GPU: {torch.cuda.get_device_name(torch.cuda.current_device())}')
+
     stamp = time.strftime('%Y-%m-%d-%H-%M-%S')
     save_dir = os.path.join('./results', f'{stamp}_fold{cli.test_fold}_{cli.tag}')
     check_dir(os.path.join(save_dir, 'checkpoint'))
