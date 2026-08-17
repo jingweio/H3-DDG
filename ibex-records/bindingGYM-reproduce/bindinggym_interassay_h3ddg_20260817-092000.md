@@ -215,6 +215,33 @@ BindingGYM 的 25 个 assay 的 `DMS_score` 尺度差 63 倍（`5A12_Ang2` std *
    - → 我们**同时报 `rmse_raw` 与 `rmse_calib`**（后者直接复用作者的实现），不做外部猜测。
 9. **在训练中的验证节奏**：BindingGYM 的 held-out fold 最大 142,905 行（fold3），全量在线验证不可行，而论文也未给 BindingGYM 的 online-validation 协议。规则：训练中每 `val_freq` 步只在一个**固定的、确定性的 per-assay 子样本**（默认每 assay 200 条，等距抽取）上评测，**仅用于监控、绝不用于 model selection**；训练结束后在 held-out fold 上做**一次全量**评测并输出 OOF。（对照：SKEMPI 那条线的 `validate_all.py` 是在评测集上选模型，见前置验证文档 §2.2-6；BindingGYM 这条线我们**不做任何基于评测集的选择**，只取最终 checkpoint。）
 
+## 5.3 Run config（5-fold job array）
+
+- sbatch：`ibex-records/bindingGYM-reproduce/sh/bindinggym_interassay_5fold_20260817-092000.sh`
+- SLURM：`--array=0-4`、`--gres=gpu:a100:1`、`--cpus-per-task=12`、`--mem=128G`、`--time=36:00:00`
+- env：`h3ddg-reproduce`（sbatch 内含断言：sklearn 必须是 1.2.1/1.3.2，否则拒跑）
+- cache：`data/BindingGYM_cache/{entries,structures}.pkl` **必须在提交 array 之前就位** —— 5 个 array task 同时启动会竞争写同一个 pickle。已在本地构建后 rsync 到 Ibex，双边 **md5 一致**（entries `46c76e45…`、structures `b5deced6…`）。
+- **提交时机（用户决定 2026-08-17）**：**等 SKEMPI 前置验证 job 50613272 跑完出结果后再提交本 array**，严格保持「前置验证 → 主实验」的串行顺序。
+- job id(s)：_(待填)_
+
+### 5.4 性能实测与 walltime 依据
+
+本地 A4500 实测 eval **2.28 s/batch(bs=4) = 1.76 rows/s**。瓶颈是 3-body hypergraph triplet attention：它在 (K, K) 的 hyperedge 对上做 attention，K = L/4，故成本 ∝ **K³** —— **结构尺寸比突变深度更主导**（4-body attention 虽逐突变位点循环，但只是 20-node 邻域，量级小得多）。
+
+各 fold 的 test 集规模与估算（按 rows × K³ 外推，a100 约快 2×）：
+
+| fold | test rows | mean depth | 主导结构（K=L/4）| 估算 eval (a100) |
+|---|---|---|---|---|
+| 0 | 114,341 | 1.88 | 1HE8 K=228、8BE4 K=151 | ~11 h |
+| 1 | 55,081 | 6.46 | 2M5A K=29、1LP1 K=27 | **~0.1 h**（结构极小）|
+| 2 | 29,332 | 2.09 | 6M17 K=232 | ~1 h |
+| 3 | 142,905 | 2.44 | 1N8Z K=253、6M0J K=197 | ~8 h |
+| 4 | 34,787 | 5.56 | 4ZFG K=162、4ZFF K=130 | ~2.8 h |
+
+加上训练（20,000 iter，本地实测 1.42 it/s）后最坏 fold0 ≈ 14 h，故 walltime 取 **36 h**。
+另注：所有结构的 K 都 < `max_num_hyperedges=420`，故 3-body attention 对每个 assay 都实际生效（该阈值一旦被超过，代码会**静默跳过**这一层）。
+**若某个 fold 仍超时的 fallback**（尚未启用，需要时再评估）：`log_probs` 只依赖 (structure, mut_flag)，同一位点的 19 种替换可共享一次前向 —— 可按 (assay, 突变位点集合) 缓存，但需先确认 `corrupt_chi_angle` 的随机性不影响结果。
+
 ## 6. Change log
 
 - **2026-08-17 09:20**：写下 plan；数据下载、inter-assay split 复现、突变映射验证完成。
@@ -223,6 +250,9 @@ BindingGYM 的 25 个 assay 的 `DMS_score` 尺度差 63 倍（`5A12_Ang2` std *
   - **用户决定：改为跑满 5 个 fold**（§4.2），fold 选择的歧义作废；
   - 结果**同时报 H3-DDG 口径与 BindingGYM 官方口径两套指标**。
 - 本地 SKEMPI smoke 已通过（3 folds 全程无报错，5 iter 后 all-mode Pearson 0.49–0.59，ProteinMPNN 权重加载生效），模型代码 + env 验证完毕。
+- **2026-08-17 11:4x**：全量数据审计通过（§3.1b：376,446 行、0 unresolved、0 wt 不符）。
+- **2026-08-17 11:5x**：BindingGYM pipeline 实现完成并本地 smoke 通过（fold4，训练 + batch>1 评测索引对齐 + 两套 per-DMS 指标全部正常产出，含 per-assay OOF csv）。发现并记录 §5.2-8 的 RMSE 定义歧义。
+- **2026-08-17 12:0x**：cache 构建 + rsync 到 Ibex（md5 双边一致）；**用户决定：等 SKEMPI job 50613272 完成后再提交 5-fold array**。
 
 ## 7. Results
 
