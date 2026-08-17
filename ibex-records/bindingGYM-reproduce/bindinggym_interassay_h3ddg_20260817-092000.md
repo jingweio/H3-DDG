@@ -210,9 +210,28 @@ BindingGYM 的 25 个 assay 的 `DMS_score` 尺度差 63 倍（`5A12_Ang2` std *
 5. **结构缺失残基的处理**：审计（§3.1b）显示 **unresolved = 0**，此分支实际不会触发；代码仍保留计数与告警。
 6. **GPU**：a100 ×1（`sinfo` 显示充足）。同一批实验统一 GPU 型号。
 7. **wild-type 行（22 行）的处理**：这些行 `mutant` 为空 → `aa_mut == aa` → `mut_flag` 全 False → `num_mut_chains = 0`，会让 collate 出的 batch 结构失效。规则：**在 side0 上标记单个位置**，使 batch 仍带一个 complex + 一个 isolated-side 行；因 `aa_mut == aa`，`wt_scores == mut_scores` ⇒ **`ddG_pred` 恒为 0**，正是 WT 的物理正确答案。这样既保住 batch 结构，又不引入偏差，且保留了官方 `assert train.shape[0] == df.shape[0]` 所要求的完整行数。
-8. **⚠️ RMSE 的定义歧义（实现上两种都算）**：H3-DDG 自己的 `utils.overall_rmse_mae`（`utils.py:499`）**不是裸 RMSE** —— 它在评测数据上现拟合一个 `LinearRegression(pred → true)`，报残差 RMSE，等价于 `std(true)·sqrt(1−r²)`，对预测的任何仿射变换不变。
-   - 但 Table 2 的 RMSE **不可能**是这个函数：若是，各方法的 RMSE 只能通过 `sqrt(1−r²)` 相差，而 r∈[0.0998, 0.3057] 只给出 **4%** 的差异；实际 ProteinMPNN 3.4974 vs H3-DDG 1.1294 差 **3 倍**。
-   - → 我们**同时报 `rmse_raw` 与 `rmse_calib`**（后者直接复用作者的实现），不做外部猜测。
+8. **✅ RMSE 的两种口径（已证实，非推测）**：H3-DDG 自己的 `utils.overall_rmse_mae`（`utils.py:499`）**不是裸 RMSE** —— 它在**正被评测的这批数据上**现拟合一个 `LinearRegression(pred → true)`，把 pred 仿射校正到 gt 的标度后再报残差 RMSE。闭式解为
+
+   $$\text{RMSE}=\text{std}(\Delta\Delta G_\text{true})\cdot\sqrt{1-\text{Pearson}^2}$$
+
+   因此它 (a) 对预测的任何仿射变换不变（完全不惩罚尺度错位），(b) **不是独立于 Pearson 的信息**，只是把 Pearson 换算成 label 单位重新表达，(c) 在测试集上拟了 2 个参数。
+
+   **SKEMPI Table 1 = 这个校正 RMSE（已确证）**。用上式反推每行隐含的 `std(ddG_true)`，与数据实测（all 2.0667 / single 1.7392 / multiple 2.6982）对照：
+
+   | 方法 | mode | Pearson | RMSE | 反推 std | 实测 std |
+   |---|---|---|---|---|---|
+   | H3-DDG | all | 0.7501 | 1.3665 | 2.0663 | 2.0667 |
+   | BA-DDG | all | 0.7118 | 1.4516 | 2.0667 | 2.0667 |
+   | Prompt-DDG | all | 0.6772 | 1.5207 | 2.0667 | 2.0667 |
+   | RDE-Network | all | 0.6447 | 1.5799 | 2.0668 | 2.0667 |
+   | H3-DDG | single | 0.7471 | 1.1560 | 1.7391 | 1.7392 |
+   | H3-DDG | multiple | 0.7341 | 1.8320 | 2.6979 | 2.6982 |
+
+   吻合到 4–5 位有效数字、跨方法跨子集自洽。（`Rosetta` 反推 1.7019、`FoldX` 2.0082、`ProMIM` 2.0471、`DiffAffinity` 2.0454 —— 这几行是从别的论文抄的，未用此函数重算。）
+
+   **BindingGYM Table 2 ≠ 这个校正 RMSE（算术排除）**：若是，各方法 RMSE 只能通过 `sqrt(1−r²)` 相差，r∈[0.0998, 0.3057] ⇒ 最多差 **4.5%**；而实际 ProteinMPNN 3.4974 vs H3-DDG 1.1294 差 **3.1 倍**。两张表口径不同。
+
+   → **对标规则**：SKEMPI Table 1 用 `rmse_calib`，BindingGYM Table 2 用 `rmse_raw`。`bindinggym_metrics.py` 两者都算并并列输出。
 9. **在训练中的验证节奏**：BindingGYM 的 held-out fold 最大 142,905 行（fold3），全量在线验证不可行，而论文也未给 BindingGYM 的 online-validation 协议。规则：训练中每 `val_freq` 步只在一个**固定的、确定性的 per-assay 子样本**（默认每 assay 200 条，等距抽取）上评测，**仅用于监控、绝不用于 model selection**；训练结束后在 held-out fold 上做**一次全量**评测并输出 OOF。（对照：SKEMPI 那条线的 `validate_all.py` 是在评测集上选模型，见前置验证文档 §2.2-6；BindingGYM 这条线我们**不做任何基于评测集的选择**，只取最终 checkpoint。）
 
 ## 5.3 Run config（5-fold job array）
