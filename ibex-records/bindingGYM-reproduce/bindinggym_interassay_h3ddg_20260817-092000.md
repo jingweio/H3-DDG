@@ -228,17 +228,21 @@ BindingGYM 的 25 个 assay 的 `DMS_score` 尺度差 63 倍（`5A12_Ang2` std *
 
 本地 A4500 实测 eval **2.28 s/batch(bs=4) = 1.76 rows/s**。瓶颈是 3-body hypergraph triplet attention：它在 (K, K) 的 hyperedge 对上做 attention，K = L/4，故成本 ∝ **K³** —— **结构尺寸比突变深度更主导**（4-body attention 虽逐突变位点循环，但只是 20-node 邻域，量级小得多）。
 
-各 fold 的 test 集规模与估算（按 rows × K³ 外推，a100 约快 2×）：
+**⚠️ 纯 K³ 外推过于激进，已用 a100 实测校正。** Ibex 上 fold1（K≈28，结构最小）实测 **13.3 rows/s**（240 行 / 18 s，eval_batch_size=8），而非 K³ 外推预测的量级。说明存在很大的**固定开销**（per-batch 的 Python 循环、ProteinMPNN encoder、dataloader），小结构上它才是主导。
 
-| fold | test rows | mean depth | 主导结构（K=L/4）| 估算 eval (a100) |
+两点实测拟合 `t_per_row = a + b·K³`（fold1 on a100 K=28 → 0.0752 s/row；fold4 dominant K≈130 → 约 0.29 s/row）：
+**a ≈ 0.073 s/row（固定开销）**，**b ≈ 9.7e-8 s per K³**。据此逐 assay 累加：
+
+| fold | test rows | mean depth | 主导结构（K=L/4，成本最高者）| eval 估算 (a100) |
 |---|---|---|---|---|
-| 0 | 114,341 | 1.88 | 1HE8 K=228、8BE4 K=151 | ~11 h |
-| 1 | 55,081 | 6.46 | 2M5A K=29、1LP1 K=27 | **~0.1 h**（结构极小）|
-| 2 | 29,332 | 2.09 | 6M17 K=232 | ~1 h |
-| 3 | 142,905 | 2.44 | 1N8Z K=253、6M0J K=197 | ~8 h |
-| 4 | 34,787 | 5.56 | 4ZFG K=162、4ZFF K=130 | ~2.8 h |
+| 0 | 114,341 | 1.88 | **1HE8 K=228 → 6.5 h 单项**、8BE4 K=151 → 2.2 h | **~10.9 h** |
+| 1 | 55,081 | 6.46 | 2M5A K=29、1LP1 K=27（全被固定开销主导）| ~1.2 h ✅实测锚点 |
+| 2 | 29,332 | 2.09 | 6M17 K=232 | ~1.4 h |
+| 3 | 142,905 | 2.44 | 6M0J K=197 → 4.9 h、1N8Z K=253 | **~9.3 h** |
+| 4 | 34,787 | 5.56 | 4ZFF K=130、4ZFG K=162 | ~2.9 h |
 
-加上训练（20,000 iter，本地实测 1.42 it/s）后最坏 fold0 ≈ 14 h，故 walltime 取 **36 h**。
+训练侧：全库平均 forward ≈ 0.245 s/row，反向+优化器约 3× ⇒ ~0.73 s/iter × 20,000 = **~4.1 h**。
+最坏 fold0 ≈ 10.9 + 4.1 ≈ **15 h**，fold3 ≈ 13 h，其余 < 8 h ⇒ walltime **36 h** 余量充足。
 另注：所有结构的 K 都 < `max_num_hyperedges=420`，故 3-body attention 对每个 assay 都实际生效（该阈值一旦被超过，代码会**静默跳过**这一层）。
 **若某个 fold 仍超时的 fallback**（尚未启用，需要时再评估）：`log_probs` 只依赖 (structure, mut_flag)，同一位点的 19 种替换可共享一次前向 —— 可按 (assay, 突变位点集合) 缓存，但需先确认 `corrupt_chi_angle` 的随机性不影响结果。
 
@@ -253,6 +257,7 @@ BindingGYM 的 25 个 assay 的 `DMS_score` 尺度差 63 倍（`5A12_Ang2` std *
 - **2026-08-17 11:4x**：全量数据审计通过（§3.1b：376,446 行、0 unresolved、0 wt 不符）。
 - **2026-08-17 11:5x**：BindingGYM pipeline 实现完成并本地 smoke 通过（fold4，训练 + batch>1 评测索引对齐 + 两套 per-DMS 指标全部正常产出，含 per-assay OOF csv）。发现并记录 §5.2-8 的 RMSE 定义歧义。
 - **2026-08-17 12:0x**：cache 构建 + rsync 到 Ibex（md5 双边一致）；**用户决定：等 SKEMPI job 50613272 完成后再提交 5-fold array**。
+- **2026-08-17 13:13**：Ibex 侧脚本验证 srun（job 50614840，a100，约 30 s 计算）通过 —— env 断言、cache 读取、fold1 划分（**train 321,365 行 / 20 assays，val 55,081 行 / 5 assays，held-out = Z-domain ×4 + BH3_Bcl-xL**，与固化的 tsv 完全一致）、训练、评测、两套指标、OOF 输出全部正常。同时拿到 a100 真实吞吐并据此校正 §5.4 的 walltime 依据（原先的纯 K³ 外推低估了固定开销）。
 
 ## 7. Results
 
