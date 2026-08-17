@@ -43,6 +43,18 @@ baseline 行（ProteinMPNN / BA-Cycle / Prompt-DDG / BA-DDG）**直接引用论�
 
 ⚠️ **必须自建 seq_map**：repo 的 `parse_biopython_structure` 返回的 `seq_map` 键是 `(chain_id, resseq)`，**丢掉了 icode**（`common_utils/protein/parsers.py:184`）。而抗体类 assay（`4ZFF_CHL`、`4ZFG`）用 Kabat 编号，`mutant_pdb` 里出现 `P52AL`（resseq 52 + icode `A`）这类位点，会与 resseq 52 冲突。故 BindingGYM loader **自建 `(chain, resseq, icode)` 三元键的 map**。
 
+### 3.1b ✅ 全量审计结果（`audit_bindinggym.py`，逐行核查全部 376,446 行）
+
+| 检查项 | 结果 |
+|---|---|
+| 总行数 | **376,446** —— 与 shipped 25 assay 的预期完全一致 |
+| 突变位点在结构中缺失（unresolved） | **0** —— `mutant_pdb` + `(chain, resseq, icode)` 映射 100% 命中 |
+| `mutant_pdb` 的 wt 字母与结构残基不符 | **0** |
+| wild-type 行（`mutant` 为空） | **22**（3 个 assay 无 WT 行：Z-domain ZSPA-1 LL1/LL2、HLA-A2）|
+| 突变落在 side0 only / side1 only / **两侧** | 322,487 / 266 / **53,671** |
+
+**结论**：(a) §3.1 的映射方案零失败，无需任何丢弃/跳过逻辑；(b) 那 53,671 行全部来自 4 个 Z-domain assay，**证实 §3.2 的 A\|B 侧划分是必需的** —— 若按「被突变链 = side0」，这 5 万多行的 thermodynamic cycle 会退化成 0；(c) 22 个 WT 行按 §5.2-7 的规则处理。
+
 ### 3.2 链分组（thermodynamic cycle 的语义）
 
 H3-DDG 的 `DDGPredictor.calc_thermodynamic_cycle` 计算 `complex_energy − Σ(被突变一侧单独的 energy)`。在 SKEMPI 里，「一侧」= `parse_biopython_structure(antibody_chain_id=…, antigen_chain_id=…)` 给出的 `chain_nb ∈ {0,1}`，即**结合的两方**（不是单条 PDB 链）。
@@ -195,8 +207,13 @@ BindingGYM 的 25 个 assay 的 `DMS_score` 尺度差 63 倍（`5A12_Ang2` std *
 2. **模型初始化**：与 SKEMPI 一致，从 ProteinMPNN `v_48_020.pt` 加载 inverse-folding 权重（`load_mpnn_state_dict`, `strict=False`），**不**从 SKEMPI 训练好的 checkpoint 继续训练（论文未提及跨数据集迁移）。
 3. **训练集**：每个 fold 用其余 4 组的 20 个左右 assay（约 23–35 万行）；`batch_size=1` + `max_iter=20000` ⇒ 每次训练只会看到约 2 万条样本（<10%）。这是论文自己的设定，忠实照做；采样方式用 shuffle 的 `inf_iterator`（与 SKEMPI 路径一致），**不**采用 BindingGYM 官方那种「每个 batch 先抽 assay 再抽 mutant」的 listwise 采样（H3-DDG 用的是 MSE 回归而非 ListMLE，无需同 assay 成组）。
 4. **实验次数与评测**：**5 次独立训练**（fold0…fold4），每次评测其留出 fold 的全部行；5 次的预测拼成 25 个 assay 的完整 OOF（合计 376,446 行），再算指标。评测输出按 assay 存成 `{DMS_id}_oof.csv`，与官方目录结构一致，便于直接套用官方 `calc_metric` 逻辑对账。
-5. **结构缺失残基的处理**：若某条 mutation 的位点在结构中不存在（gap），SKEMPI 代码是静默跳过（`skempi.py:139`）。BindingGYM loader 会**统计并报告**这类条目数量；数量少则跳过该位点，数量大则整条丢弃并记录。
+5. **结构缺失残基的处理**：审计（§3.1b）显示 **unresolved = 0**，此分支实际不会触发；代码仍保留计数与告警。
 6. **GPU**：a100 ×1（`sinfo` 显示充足）。同一批实验统一 GPU 型号。
+7. **wild-type 行（22 行）的处理**：这些行 `mutant` 为空 → `aa_mut == aa` → `mut_flag` 全 False → `num_mut_chains = 0`，会让 collate 出的 batch 结构失效。规则：**在 side0 上标记单个位置**，使 batch 仍带一个 complex + 一个 isolated-side 行；因 `aa_mut == aa`，`wt_scores == mut_scores` ⇒ **`ddG_pred` 恒为 0**，正是 WT 的物理正确答案。这样既保住 batch 结构，又不引入偏差，且保留了官方 `assert train.shape[0] == df.shape[0]` 所要求的完整行数。
+8. **⚠️ RMSE 的定义歧义（实现上两种都算）**：H3-DDG 自己的 `utils.overall_rmse_mae`（`utils.py:499`）**不是裸 RMSE** —— 它在评测数据上现拟合一个 `LinearRegression(pred → true)`，报残差 RMSE，等价于 `std(true)·sqrt(1−r²)`，对预测的任何仿射变换不变。
+   - 但 Table 2 的 RMSE **不可能**是这个函数：若是，各方法的 RMSE 只能通过 `sqrt(1−r²)` 相差，而 r∈[0.0998, 0.3057] 只给出 **4%** 的差异；实际 ProteinMPNN 3.4974 vs H3-DDG 1.1294 差 **3 倍**。
+   - → 我们**同时报 `rmse_raw` 与 `rmse_calib`**（后者直接复用作者的实现），不做外部猜测。
+9. **在训练中的验证节奏**：BindingGYM 的 held-out fold 最大 142,905 行（fold3），全量在线验证不可行，而论文也未给 BindingGYM 的 online-validation 协议。规则：训练中每 `val_freq` 步只在一个**固定的、确定性的 per-assay 子样本**（默认每 assay 200 条，等距抽取）上评测，**仅用于监控、绝不用于 model selection**；训练结束后在 held-out fold 上做**一次全量**评测并输出 OOF。（对照：SKEMPI 那条线的 `validate_all.py` 是在评测集上选模型，见前置验证文档 §2.2-6；BindingGYM 这条线我们**不做任何基于评测集的选择**，只取最终 checkpoint。）
 
 ## 6. Change log
 

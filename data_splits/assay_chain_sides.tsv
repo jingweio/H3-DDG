@@ -1,0 +1,48 @@
+# Per-assay binding-partner grouping for BindingGYM, used to build H3-DDG's thermodynamic cycle.
+#
+# WHY THIS IS NEEDED
+#   DDGPredictor.calc_thermodynamic_cycle computes  complex_energy - sum(energy of each mutated
+#   "chain" in isolation).  In H3-DDG's SKEMPI path a "chain" is not one PDB chain but one SIDE of
+#   the interface: parse_biopython_structure(antibody_chain_id=..., antigen_chain_id=...) collapses
+#   each side into a single chain_nb (0/1), and MPNNPaddingCollate then uses chain_encoding_all =
+#   chain_nb + 1 to build the per-side isolated copies.  BindingGYM ships no such annotation, so the
+#   two sides are declared here, once, explicitly.
+#
+# HOW side0 / side1 WERE DERIVED (all verified against the data, not guessed)
+#   * side0 = the protein named FIRST in DMS_id (the mutated protein); side1 = its partner.
+#   * For 21 of 25 assays side0 is exactly the set of chains that ever carry a mutation.
+#   * Antibody/Fab partners occupy TWO PDB chains that are one protein, so they are grouped:
+#     4D5 = A(light)+B(heavy) in 1N8Z; 5A12 = H+L in 4ZFF/4ZFG.
+#   * The 4 Z-domain assays are synthetic-coevolution studies in which BOTH partners are mutated,
+#     so "chains that ever carry a mutation" spans both sides and cannot define the split; there
+#     each protein is a single chain, so the sides are simply A | B.
+#   * Every structure's chain set equals its chain_id set (checked: no bystander chains), so nothing
+#     is dropped by parse_biopython_structure.
+#
+# Chain lengths (from wildtype_sequence) are given in `note` as the audit trail.
+DMS_id	side0_chains	side1_chains	note
+4D5_HER2_fitness_1N8Z	AB	C	side0=4D5 Fab: A light 214 + B heavy 220; side1=HER2 607
+5A12_Ang2_fitness_4ZFG	HL	A	side0=5A12 Fab: H 219 + L 213; side1=Ang2 220
+5A12_VEGF_fitness_4ZFF	HL	C	side0=5A12 Fab: H 219 + L 213; side1=VEGF 96
+Z-domain_ZpA963_HL1_fitness_2M5A	A	B	both sides mutated (coevolution); A 58 | B 58
+Z-domain_ZpA963_HL2_fitness_2M5A	A	B	both sides mutated (coevolution); A 58 | B 58
+Z-domain_ZSPA-1_LL1_fitness_1LP1	A	B	both sides mutated (coevolution); A 55 | B 54
+Z-domain_ZSPA-1_LL2_fitness_1LP1	A	B	both sides mutated (coevolution); A 55 | B 54
+CXCR4_CXCL12_enrich_8U4O	R	J	side0=CXCR4 295; side1=CXCL12 65
+hYAP65_peptide_FunctioncalScore_1JMQ	A	P	side0=hYAP65 WW domain 46; side1=peptide 10
+GB1_IgG-Fc_fitness_1FCC	C	A	side0=GB1 56; side1=IgG-Fc 206
+GB1_IgG-Fc_fitness_1FCC_2016	C	A	side0=GB1 56; side1=IgG-Fc 206
+SARS2-RBD_ACE2_deltaKd_6M0J	E	A	side0=SARS2 RBD 194; side1=ACE2 597
+KRAS_DARPinK27_norfitness_5O2S	A	B	side0=KRAS 165; side1=DARPin K27 156
+KRAS_PICK3CG-RBD_norfitness_1HE8	B	A	side0=KRAS 166; side1=PI3Kgamma 941
+KRAS_RAF1_norfitness_6VJJ	A	B	side0=KRAS 168; side1=RAF1 77
+KRAS_RAF1-RBD_norfitness_6VJJ	A	B	side0=KRAS 168; side1=RAF1-RBD 77
+KRAS_RALGDS-RBD_norfitness_1LFD	B	A	side0=KRAS 167; side1=RALGDS-RBD 87
+KRAS_SOS1_norfitness_8BE4	R	S	side0=KRAS 168; side1=SOS1 475
+BH3_Mcl-1_normed_3KZ0	C	A	side0=BH3 peptide 23; side1=Mcl-1 150
+BH3_Bcl-xL_normed_1PQ1	B	A	side0=BH3 peptide 33; side1=Bcl-xL 196
+HLA-A2_TAPBPR_meanscore_5WER	A	C	side0=HLA-A2 274; side1=TAPBPR 370
+PSD95_CRIPT_1BE9	A	B	side0=PSD95 PDZ3 115; side1=CRIPT peptide 5
+PSD95_Tm2F_1BE9	A	B	side0=PSD95 PDZ3 115; side1=T-2F peptide 5
+ACE2_SARS2-RBD_enrich_6M17	B	E	side0=ACE2 748; side1=SARS2 RBD 183
+CD19_FMC63_Fitness_7URV	C	D	side0=CD19 255; side1=FMC63 scFv 242

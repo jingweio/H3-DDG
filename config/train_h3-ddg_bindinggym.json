@@ -1,0 +1,35 @@
+{
+  "_comment": "H3-DDG on BindingGYM, inter-assay split. Hyperparameters follow the paper's Appendix A.4 (NOT config/train_h3-ddg.json, which is the SKEMPI setting).",
+
+  "lr": 0.0004,
+  "batch_size": 1,
+  "max_iter": 20000,
+  "weight_decay": 0.0,
+  "seed": 42,
+
+  "hidden_dim": 128,
+  "num_layers": 3,
+  "num_tri_heads": 4,
+  "num_edges": 48,
+  "ca_only": false,
+  "backbone_noise": 0.0,
+  "patch_size": 128,
+  "loss_weight_boltzmann": 1.0,
+
+  "_comment_hyperedges": "Appendix A.4 says hyperedges were selected from {L/10, L/6, L/4} and 4-body edges from {1N, 2N, 3N} but does not state which was used for BindingGYM. We take L/4 + 3N, the combination Appendix B.5 reports as best.",
+  "use_hypergraph": true,
+  "hyper_ratio": 4,
+  "max_num_hyperedges": 420,
+  "num_mut_subgraph_nodes": 20,
+  "num_edges_ratio": 3.0,
+  "edges_selection": "dynamic",
+
+  "_comment_eval": "eval_batch_size > 1 is safe here because train_bindinggym.py aligns predictions to metadata via complex_row_indices(); monitor_per_assay caps the in-training monitoring eval, the end-of-run eval is always full.",
+  "eval_batch_size": 8,
+  "val_freq": 5000,
+  "monitor_per_assay": 200,
+
+  "ex_type": "train",
+  "ex_name": "bindinggym_interassay_h3-ddg",
+  "ckpt_path": "./data/v_48_020.pt"
+}
