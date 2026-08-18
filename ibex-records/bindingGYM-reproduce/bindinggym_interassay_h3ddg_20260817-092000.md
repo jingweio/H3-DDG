@@ -1,6 +1,6 @@
 # bindingGYM-reproduce — 主实验：H3-DDG 在 BindingGYM inter-assay split 上的复现 (Table 2)
 
-> created 2026-08-17 09:20 ｜ **status: PLANNED**
+> created 2026-08-17 09:20 ｜ **status: RUNNING**（array 50674363 已提交；前置 SKEMPI 验证已通过）
 > 前置验证：[skempiv2_cv3_h3ddg_20260817-092000.md](skempiv2_cv3_h3ddg_20260817-092000.md)
 
 ## 1. Goal / hypothesis
@@ -241,7 +241,7 @@ BindingGYM 的 25 个 assay 的 `DMS_score` 尺度差 63 倍（`5A12_Ang2` std *
 - env：`h3ddg-reproduce`（sbatch 内含断言：sklearn 必须是 1.2.1/1.3.2，否则拒跑）
 - cache：`data/BindingGYM_cache/{entries,structures}.pkl` **必须在提交 array 之前就位** —— 5 个 array task 同时启动会竞争写同一个 pickle。已在本地构建后 rsync 到 Ibex，双边 **md5 一致**（entries `46c76e45…`、structures `b5deced6…`）。
 - **提交时机（用户决定 2026-08-17）**：**等 SKEMPI 前置验证 job 50613272 跑完出结果后再提交本 array**，严格保持「前置验证 → 主实验」的串行顺序。
-- job id(s)：_(待填)_
+- **job id(s)**：array **`50674363_[0-4]`**（5 folds × 23 h，`gpu,gpu24`，2026-08-18 22:5x 提交）
 
 ### 5.4 性能实测与 walltime 依据
 
