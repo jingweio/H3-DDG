@@ -32,7 +32,7 @@ srun python train_skempi.py \
   --tag cv3_h3ddg_repro
 
 echo "=== DONE train; running validate_all over the saved per-fold results ==="
-SAVE_DIR=$(ls -td ./results/*_cv3_h3ddg_repro | head -1)
+SAVE_DIR=$(ls -td ./results/*_cv3_h3ddg_repro | sed -n '1p')
 echo "save_dir=${SAVE_DIR}"
 python validate_all.py --save_dir "${SAVE_DIR}" --top_k 5
 echo "=== ALL DONE ==="

@@ -24,7 +24,10 @@ cd /ibex/user/guoj0f/H3-DDG/reproduce
 SAVE_DIR=./results/skempiv2_cv3_h3ddg_20260817-092000
 
 echo "=== per-fold artifacts present ==="
-ls -la "${SAVE_DIR}" | head -20
+# NOTE: `... | head -N` is a trap under `set -euo pipefail`: head closes the pipe after N lines,
+# ls dies of SIGPIPE, pipefail propagates it, and set -e kills the script before it does any work.
+# That is exactly how job 50673544 failed in 4 seconds. sed reads its input to the end instead.
+ls -la "${SAVE_DIR}" | sed -n '1,20p'
 for f in 0 1 2; do
   n=$(ls "${SAVE_DIR}"/fold${f}_its*_results.csv 2>/dev/null | wc -l)
   echo "fold${f}: ${n} saved per-iteration result files"
