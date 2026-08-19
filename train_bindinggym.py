@@ -107,6 +107,11 @@ def main():
     parser.add_argument('--reset_cache', action='store_true')
     parser.add_argument('--max_eval_batches', type=int, default=None,
                         help='cap the final evaluation (SMOKE TESTS ONLY -- never for reported runs)')
+    parser.add_argument('--save_dir', type=str, default=None,
+                        help='fixed output dir. REQUIRED for --resume to find anything: the default '
+                             'is timestamped, so a requeued job would look in a brand-new directory.')
+    parser.add_argument('--resume', action='store_true',
+                        help='continue from the newest periodic checkpoint in --save_dir, if one exists.')
     cli = parser.parse_args()
 
     param = {k: v for k, v in json.loads(open(cli.config_path).read()).items()
@@ -122,10 +127,17 @@ def main():
     if torch.cuda.is_available():
         print(f'GPU: {torch.cuda.get_device_name(torch.cuda.current_device())}')
 
-    stamp = time.strftime('%Y-%m-%d-%H-%M-%S')
-    save_dir = os.path.join('./results', f'{stamp}_fold{cli.test_fold}_{cli.tag}')
-    check_dir(os.path.join(save_dir, 'checkpoint'))
-    check_dir(os.path.join(save_dir, 'oof'))
+    if cli.save_dir is not None:
+        save_dir = cli.save_dir
+        # NOTE: check_dir(overwrite=True) does shutil.rmtree -- it would delete the very
+        # checkpoints --resume needs. Never use it on a caller-supplied save_dir.
+        os.makedirs(os.path.join(save_dir, 'checkpoint'), exist_ok=True)
+        os.makedirs(os.path.join(save_dir, 'oof'), exist_ok=True)
+    else:
+        stamp = time.strftime('%Y-%m-%d-%H-%M-%S')
+        save_dir = os.path.join('./results', f'{stamp}_fold{cli.test_fold}_{cli.tag}')
+        check_dir(os.path.join(save_dir, 'checkpoint'))
+        check_dir(os.path.join(save_dir, 'oof'))
     log_file = open(os.path.join(save_dir, 'train_log.txt'), 'a+')
     with open(os.path.join(save_dir, 'train_config.json'), 'w') as f:
         json.dump(vars(args), f, indent=2)
@@ -150,27 +162,61 @@ def main():
                             collate_fn=MPNNPaddingCollate(), num_workers=cli.num_workers)
     print(f'monitoring subset: {len(mon_idx)} rows')
 
+    # ---- periodic checkpointing so a walltime kill costs one interval, not the whole run ----
+    # The released SKEMPI path only saves after the training loop finishes (and its periodic save is
+    # gated behind num_cvfolds == 1), which is why fold1 of the SKEMPI run lost its weights at 97.4%.
+    # Here we save every ckpt_freq iterations and can resume from the newest one.
+    ckpt_dir = os.path.join(save_dir, 'checkpoint')
+    ckpt_freq = int(getattr(args, 'ckpt_freq', 5000))
+    state_path = os.path.join(ckpt_dir, f'resume_fold{cli.test_fold}.pt')
+
+    start_it = 0
+    if cli.resume and os.path.exists(state_path):
+        blob = torch.load(state_path, map_location='cpu')
+        cv_mgr.load_state_dict(blob['cv_mgr'])
+        model, optimizer, _ = cv_mgr.get(0)
+        model.to(device)
+        start_it = int(blob['iteration']) + 1
+        msg = (f"[resume] loaded {state_path} @ iteration {blob['iteration']}; "
+               f"continuing at {start_it}/{args.max_iter}")
+        print(msg); log_file.write(msg + '\n'); log_file.flush()
+    elif cli.resume:
+        print(f'[resume] no checkpoint at {state_path}; starting from scratch')
+
+    def save_resume_point(its):
+        # Written to a temp file then renamed: a kill mid-write must not corrupt the only copy.
+        tmp = state_path + '.tmp'
+        torch.save({'cv_mgr': cv_mgr.state_dict(), 'iteration': its,
+                    'test_fold': cli.test_fold, 'max_iter': args.max_iter}, tmp)
+        os.replace(tmp, state_path)
+        m = f"[ckpt] saved resume point at iteration {its} -> {state_path}"
+        print(m); log_file.write(m + '\n'); log_file.flush()
+
     train_loader = mgr.get_train_loader()
     t0 = time.time()
-    for its in range(args.max_iter):
+    for its in range(start_it, args.max_iter):
         batch = next(train_loader)
         loss, _ = process_batch(model, batch, device, is_train=True, optimizer=optimizer)
 
         if its % 100 == 1:
-            rate = (its + 1) / max(time.time() - t0, 1e-6)
+            rate = (its - start_it + 1) / max(time.time() - t0, 1e-6)
             msg = (f"{time.strftime('%Y-%m-%d %H-%M-%S')} | [train] iter {its}/{args.max_iter} "
                    f"| Loss {loss.item():.6f} | {rate:.2f} it/s")
             print(msg)
             log_file.write(msg + '\n')
             log_file.flush()
 
+        if its > 0 and its % ckpt_freq == 0:
+            save_resume_point(its)
+
         if its > 0 and its % args.val_freq == 1:
             df, vloss = collect_results(model, mon_loader, device, desc=f'monitor@{its}')
             log_file.write(f'[monitor] iter {its} val_loss {vloss:.6f}\n')
             log_summary(f'monitor iter {its}', evaluate_oof(df), log_file)
 
+    save_resume_point(args.max_iter - 1)   # training finished; also the resume no-op point
     torch.save(cv_mgr.state_dict(),
-               os.path.join(save_dir, 'checkpoint', f'h3ddg_bindinggym_fold{cli.test_fold}.ckpt'))
+               os.path.join(ckpt_dir, f'h3ddg_bindinggym_fold{cli.test_fold}.ckpt'))
 
     if cli.max_eval_batches is not None:
         print(f'!! WARNING: final eval capped at {cli.max_eval_batches} batches -- SMOKE TEST ONLY')

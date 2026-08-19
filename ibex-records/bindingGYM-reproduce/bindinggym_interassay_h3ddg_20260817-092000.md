@@ -241,7 +241,16 @@ BindingGYM 的 25 个 assay 的 `DMS_score` 尺度差 63 倍（`5A12_Ang2` std *
 - env：`h3ddg-reproduce`（sbatch 内含断言：sklearn 必须是 1.2.1/1.3.2，否则拒跑）
 - cache：`data/BindingGYM_cache/{entries,structures}.pkl` **必须在提交 array 之前就位** —— 5 个 array task 同时启动会竞争写同一个 pickle。已在本地构建后 rsync 到 Ibex，双边 **md5 一致**（entries `46c76e45…`、structures `b5deced6…`）。
 - **提交时机（用户决定 2026-08-17）**：**等 SKEMPI 前置验证 job 50613272 跑完出结果后再提交本 array**，严格保持「前置验证 → 主实验」的串行顺序。
-- **job id(s)**：array **`50674363_[0-4]`**（5 folds × 23 h，`gpu,gpu24`，2026-08-18 22:5x 提交）
+- ~~array **`50674363_[0-4]`**（5 × 23 h，2026-08-18 22:5x 提交）~~ → 排队过久，2026-08-19 scancel，改为 5 个独立 job（见 §5.5）
+- **job id(s)**（2026-08-19 提交，全部 `gpu,gpu24`）：
+
+| fold | job | walltime |
+|---|---|---|
+| 0 | `50680591` | 18 h |
+| 1 | `50680592` | 8 h |
+| 2 | `50680593` | 8 h |
+| 3 | `50680595` | 16 h |
+| 4 | `50680596` | 10 h |
 
 ### 5.4 性能实测与 walltime 依据
 
@@ -264,6 +273,51 @@ BindingGYM 的 25 个 assay 的 `DMS_score` 尺度差 63 倍（`5A12_Ang2` std *
 最坏 fold0 ≈ 10.9 + 4.1 ≈ **15 h**，fold3 ≈ 13 h，其余 < 8 h ⇒ walltime **36 h** 余量充足。
 另注：所有结构的 K 都 < `max_num_hyperedges=420`，故 3-body attention 对每个 assay 都实际生效（该阈值一旦被超过，代码会**静默跳过**这一层）。
 **若某个 fold 仍超时的 fallback**（尚未启用，需要时再评估）：`log_probs` 只依赖 (structure, mut_flag)，同一位点的 19 种替换可共享一次前向 —— 可按 (assay, 突变位点集合) 缓存，但需先确认 `corrupt_chi_angle` 的随机性不影响结果。
+
+## 5.5 🔄 排队优化：array → 5 个独立 job + 差异化 walltime + 定期 checkpoint（用户决定 2026-08-19）
+
+**起因**：`50674363_[0-4]`（5 × 23 h）排了 22 轮（约 11 h）始终 PENDING，`squeue --start` 预估一路在 `08-20` ～ `08-23` 之间漂移，最坏时约 4.5 天。同期集群 a100 **268 卡仅 11 张空闲（96% 占用）**，排队等 a100 的 job 从两天前的 133 个涨到 **333 个**。统一的 23 h walltime + 5-task array 形状让 backfill 很难插空。
+
+### (1) 拆成 5 个独立 job
+
+- job 脚本：`sh/bindinggym_perfold_20260819.sh`（fold 由位置参数 `$1` 传入）
+- 提交器：`sh/submit_bindinggym_perfold.sh`（内含 walltime 表，可审计）
+- 依据：SKEMPI 那次从「单 job 48 h」拆成「array 3 × 14 h」后，partition 从 `gpu,gpu72`（35 节点）变为 `gpu,gpu24`（49 节点），预估排队从 3 天降到 1.2 天，最终实际约 13 h 开跑。
+
+### (2) 按 fold 差异化压缩 walltime
+
+原先 23 h 是按最坏的 fold0 定的，但各 fold 成本差一个数量级（§5.4）。改为逐 fold 按自身实测/估算给：
+
+| fold | eval 估算 | + 训练 ~4 h | walltime | 主导结构 |
+|---|---|---|---|---|
+| 0 | ~10.9 h | ~15 h | **18 h** | 1HE8 K=228 |
+| 1 | ~1.2 h（a100 实测锚点）| ~5.3 h | **8 h** | 2M5A/1LP1 K≈28 |
+| 2 | ~1.4 h | ~5.5 h | **8 h** | 6M17 K=232 |
+| 3 | ~9.3 h | ~13.4 h | **16 h** | 6M0J K=197 |
+| 4 | ~2.9 h | ~7 h | **10 h** | 4ZFF K=130 |
+
+全部 ≤ 24 h，保住最大的 a100 池 `gpu24`（32 节点）。最坏 GPU 预算由 5×23 = 115 GPU-h 降到 **60 GPU-h**。
+
+### (3) 新增训练中的 model-weights checkpoint + resume
+
+**动机**：SKEMPI 的 f1 在 97.4% 处被 walltime 杀掉，权重全丢 —— 因为作者代码的定期保存被 `if args.num_cvfolds == 1:` 门控住了，只在训练循环**结束后**才存一次。有了差异化（更紧的）walltime，这个风险必须堵住。
+
+`train_bindinggym.py` 的改动：
+
+- **每 `ckpt_freq` 步存一个 resume point**（config 默认 `5000`，即 20,000 iter 存 3 次 + 收尾 1 次 —— 按用户要求"不用太密"）
+- 存的是 `cv_mgr.state_dict()`，**含 model + optimizer + scheduler**，故可真正续训而非只留权重
+- **原子写入**：先写 `.tmp` 再 `os.replace()`，被 kill 在写盘中途也不会毁掉唯一副本
+- 新增 `--resume`：从 `checkpoint/resume_fold{F}.pt` 读回并从 `iteration+1` 继续；找不到就从头开始（幂等，可安全放进 sbatch 常开）
+- 新增 `--save_dir`：resume 必须有**固定**目录（默认目录带时间戳，重投会指向一个全新空目录）。该路径**刻意不用 `check_dir()`** —— 它的 `overwrite=True` 会 `shutil.rmtree`，正好会删掉 resume 所需的 checkpoint
+- ⚠️ **已知局限**：resume 不恢复 DataLoader 的抽样位置，续训后的样本序列与不间断跑不完全一致（与 §2.3 里 SKEMPI 那条同类的"随机抽样差异"，不影响数据划分）
+
+⇒ walltime 到点不再是灾难：最多损失一个 ckpt 区间（≤5,000 iter），重投带 `--resume` 即可接上。
+
+**本地实测（2026-08-19，A4500）**：
+1. 第一次运行 `max_iter=7, ckpt_freq=3` → 在 iter 3、6 各存一次 resume point（27.8 MB，单文件覆盖写）
+2. 第二次带 `--resume` 且 `max_iter=12` → 日志打出 `[resume] loaded ... @ iteration 6; continuing at 7/12`，续训后继续正常存点并跑到 `DONE`
+
+✅ 机制验证通过后才提交 Ibex（§1b local-first）。
 
 ## 6. Change log
 
