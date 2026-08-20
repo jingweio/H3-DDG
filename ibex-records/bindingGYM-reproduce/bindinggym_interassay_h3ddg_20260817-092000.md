@@ -319,6 +319,35 @@ BindingGYM 的 25 个 assay 的 `DMS_score` 尺度差 63 倍（`5A12_Ang2` std *
 
 ✅ 机制验证通过后才提交 Ibex（§1b local-first）。
 
+## 5.6 运行日志（per-fold jobs）
+
+| fold | job | walltime | 开跑时间 | 状态 |
+|---|---|---|---|---|
+| 1 | `50680592` | 8 h | **2026-08-20 06:30** | RUNNING |
+| 2 | `50680593` | 8 h | 预估 `08-21 06:40` | PENDING |
+| 0 | `50680591` | 18 h | 预估 `08-22 15:52` | PENDING |
+| 3 | `50680595` | 16 h | 预估 `08-22 21:08` | PENDING |
+| 4 | `50680596` | 10 h | 预估 `08-22 23:00` | PENDING |
+
+**排队实况**：5 个 job 于 2026-08-19 提交，f1 排队约 **20 h** 后开跑。期间 `squeue --start` 的预估在 `08-21`～`08-25` 之间反复漂移（详见 §5.5 的分析：Ibex 用 `sched/backfill`，`bf_interval=120` 每 2 分钟重算，预估是"假设所有 job 跑满 walltime"的保守上界）。同期集群 a100 **占用 96%（268 卡仅 11–20 张空闲）**、等 a100 的 pending job **330+**，而我们的 `sprio` 优先级 573 分中 **fairshare 占 572、AGE 贡献 0** —— 即排队时长不加分，只能等 backfill 找到空隙。
+
+**拆分策略得到验证**：f1 是 5 个里 walltime 最短的（8 h），也是第一个被 backfill 插进空隙的。此前它曾三次拿到较早的预估窗口又被抢走，第四次坐实。
+
+### f1 启动检查（全部通过）
+
+```
+torch 1.13.1+cu117 | cuda 11.7 | gpu NVIDIA A100-SXM4-80GB
+numpy 1.22.4 | pandas 1.5.3 | sklearn 1.2.1 | biopython 1.81   ← 版本 guard 通过
+[fold 1] train: 321365 rows / 20 assays | val: 55081 rows / 5 assays
+[fold 1] held-out assays: ['BH3_Bcl-xL_normed_1PQ1', 'Z-domain_ZSPA-1_LL1_fitness_1LP1',
+                           'Z-domain_ZSPA-1_LL2_fitness_1LP1', 'Z-domain_ZpA963_HL1_fitness_2M5A',
+                           'Z-domain_ZpA963_HL2_fitness_2M5A']
+[resume] no checkpoint at ./results/bindinggym_interassay_fold1/checkpoint/resume_fold1.pt; starting from scratch
+```
+
+- 划分与固化的 `data_splits/inter_assay_folds.tsv` **完全一致**（§4.1 的 fold1 行）
+- **`--resume` 的幂等分支按设计工作**：首次运行无 checkpoint 时正常从头开始而非报错，故可永久留在 sbatch 里
+
 ## 6. Change log
 
 - **2026-08-17 09:20**：写下 plan；数据下载、inter-assay split 复现、突变映射验证完成。
