@@ -83,17 +83,38 @@ clusters    = [cluster_map[DMS_id] for DMS_id in BindingGYM.csv['DMS_id']]   # �
 split       = list(GroupKFold(n_splits=5).split(clusters, groups=clusters))  # assay 级别
 ```
 
-### 4.0 🔴 复现陷阱：fold 成员依赖 **sklearn 版本**
+### 4.0 🔴 复现陷阱：fold 成员依赖 **numpy 版本**（⚠️ 归因已更正）
 
-`GroupKFold` 不接受随机种子，但它按 group size 降序贪心分配，**这里 25 个 assay 落在 14 个 cluster、size 大量并列（6,4,2,2,2,1×9）**，因此结果完全由 tie-breaking 决定 —— 而 tie-breaking 在 sklearn 1.6 的重构中变了。实测：
+`GroupKFold` 不接受随机种子，按 group size 降序贪心分配（LPT 装箱）。**25 个 assay 落在 14 个 cluster，size 为 `[1,2,1,1,1,1,1,2,1,6,2,1,4,1]` —— 14 个里有 12 个并列**（九个 1、三个 2），所以分配结果完全由"并列元素的排序次序"决定。
 
-| sklearn | fold 成员 |
-|---|---|
-| **1.2.1**（H3-DDG README 指定）| **A** |
-| **1.3.2**（BindingGYM.yml 指定）| **A**（与 1.2.1 完全一致）|
-| 1.7.2（本机 base env）| **B** —— CD19↔CXCR4 在 fold2/3 之间互换、SARS2-RBD↔HLA-A2 在 fold3/4 之间互换 |
+**⚠️ 2026-08-21 更正**：此处先前写作「tie-breaking 在 sklearn 1.6 的重构中变了」，**该归因是错的**。逐行对比 `GroupKFold._iter_test_indices` 的源码证明：**sklearn 1.2.1 与 1.7.2 的非-shuffle 分支完全相同**（1.6 只是新增了一个独立的 `if self.shuffle` 分支）。真正起决定作用的是其中这一行里的 numpy：
 
-→ **本项目一律锁定 sklearn 1.2.1**（H3-DDG 与 BindingGYM 的指定版本在此点上等价）。env 已按此固定。
+```python
+indices = np.argsort(n_samples_per_group)[::-1]   # 默认 kind='quicksort'，不稳定排序
+```
+
+不稳定排序对并列元素不保证次序，而该次序随 numpy 版本变化。在本数据的权重向量上实测：
+
+| 环境 | numpy / sklearn | `argsort(w)[::-1]` | fold 分配 | 指纹 |
+|---|---|---|---|---|
+| **H3-DDG README 指定** | 1.22.4 / 1.2.1 | `[9,12,10,7,1,13,11,8,6,5,4,3,2,0]` | **A** | `d23e15f9…` |
+| **BindingGYM.yml 指定** | 1.24.4 / 1.3.2 | 同上 | **A** | `d23e15f9…` |
+| base env（对照）| 2.3.5 / 1.7.2 | `[9,12,10,7,1,13,`**`8,11,5,6`**`,4,3,2,0]` | **B** | `d217e2bf…` |
+
+B 相对 A 的差异：`CD19↔CXCR4` 在 fold2/3 互换、`SARS2-RBD↔HLA-A2` 在 fold3/4 互换（4 个 assay 换组）。
+
+**✅ 对本项目的实际影响：无。** 两篇论文各自声明的环境给出**完全相同**的划分 A，而 `data_splits/inter_assay_folds.tsv` 的指纹正是 `d23e15f9…` —— 与二者逐位一致。base env 那次误用只发生在最初的探查阶段，当天即发现并改正（commit `1a38c0f`），从未进入任何实验。
+
+**为什么归因错了、结果却对**：当初锁 sklearn 1.2.1 时，实际上是把整个 pinned env（含 numpy 1.22.4）一起锁住了 —— 歪打正着；更关键的是**把结果固化成 committed 文件**这一步对根因是不可知论的，无论真凶是谁都能挡住。
+
+**加固后的三道防线**（`make_inter_assay_folds.py`，2026-08-21）：
+1. **numpy 版本 guard**（`1.22.4` / `1.24.4`）—— 补上了真正的风险点，此前只锁 sklearn
+2. sklearn 版本 guard（`1.2.1` / `1.3.2`）—— 保留，用于断言整个 pinned env
+3. **指纹校验**：生成后与 `EXPECTED_FINGERPRINT = d23e15f9…` 比对，不符则拒绝写盘。**这道防线不依赖归因是否正确** —— 即使出现未见过的版本组合，也不可能静默产出不同划分
+
+三种情形均已实测：正确环境通过；base env 被版本 guard 拦下；**用 `--allow_any_version` 绕过版本 guard 后，指纹防线仍然拦住**。
+
+> 残余不确定性（诚实记录）：BindingGYM 未发布 fold 成员清单，只发布 cluster 表 + 代码。故"正确"的最强含义是「在两篇论文各自声明的环境下由官方代码确定性重算，且两者一致」。若作者实机所用 numpy 与其 yml 声明不符，仍可能存在差异 —— 但这一点无法从公开材料证伪。
 
 ### 4.1 正确的 fold 组成（sklearn 1.2.1）
 
