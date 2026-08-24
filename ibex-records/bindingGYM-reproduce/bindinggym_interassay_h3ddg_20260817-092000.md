@@ -565,6 +565,72 @@ f1 的监控轨迹：
 
 ⚠️ 以上 1/3 都是**论文之外的诊断实验**，不改变已报告的复现口径；per-assay 标准化、换 ListMLE 等偏离论文的改动仍未获批准，不做。
 
+## 5.11 读到论文原文后的三处更正与一个新发现（2026-08-24）
+
+拿到 `repos/Sources/H3-DDG (NIPS 2025).pdf` 后逐字核对 §3.4 / §4.1 / §4.3 / Table 2 / A.2–A.4。
+
+### ① `lr=4e-4` 不是我的 bug —— 但 A.4 与作者自己发布的 config 矛盾
+
+A.4.1 原文：
+
+> We used the Adam optimizer with a **learning rate of 4e-4** and a **batch size of 1, 2**, depending on
+> GPU memory and graph size. The model was trained for **20,000 iterations** with 4 attention heads
+> and a hidden dimension of 128.
+
+所以 §5.10 ⑥ 里「可能是我抄错」的猜测**撤回**，`config/train_h3-ddg_bindinggym.json` 是忠实转录。
+
+**但 A.4 是一个不分数据集的全局章节，而它与作者仓库里唯一发布的 config 直接矛盾**：
+
+| | A.4 原文 | 作者 `config/train_h3-ddg.json`（唯一发布的）|
+|---|---|---|
+| `lr` | 4e-4 | **4e-05** |
+| `max_iter` | 20,000 | **38,000**（commit `d03eda5` 从 50,000 改下来）|
+
+**而我们复现出 Table 1 用的是发布的 config（4e-5 / 38k），不是 A.4（4e-4 / 20k）。** 也就是说 **A.4 的数字连它自己论文里唯一可验证的那个 run（SKEMPI）都描述不了**。这把 A.4 从「规格说明」降级为「不可靠的二手描述」，那么它对 BindingGYM 是否可靠同样无从保证。
+
+### ② zero-shot 假设被 Table 2 自己推翻
+
+Table 2 里 **ProteinMPNN 是一行独立的 baseline**：ALL Pearson 0.0998 / Spearman 0.2050 / AUROC 0.5341 / RMSE **3.4974**。H3-DDG 的 0.3057 与它并列出现，所以 **0.3057 是监督训练的数值，不是 zero-shot**。§5.10 ⑦ 的假设作废。
+
+（RMSE 3.4974 这个量级本身印证了 §5.10 ⑤ 的机制：zero-shot 的 ProteinMPNN 输出在 kcal/mol 尺度上，对着 DMS score 的 label 算 RMSE 就是这么大 —— 和我们 iter-1 测到的 6.72 同源。另外我们未训练测到 +0.3008，是论文 ProteinMPNN 行 0.0998 的 3 倍、BA-Cycle 0.1320 的 2.3 倍，**这个数字反而偏高得可疑**，很可能是 1,000 行子样本的运气，这也是为什么 iter-0 全量 baseline 值得单独跑。）
+
+### ③ 损失函数确认就是裸 MSE，全文无任何 label 归一化
+
+§3.4 式 (17)：`L_MSE = (1/n) Σ (ΔΔG_pred − ΔΔG_true)²`。全文（含附录）没有出现 per-assay 标准化 / 归一化。
+
+而 §4.3 结尾作者**明确承认了尺度问题**：
+
+> While H3-DDG's RMSE under single-point mutations is slightly higher than the baseline methods,
+> this can be attributed to the BindingGYM dataset spanning different DMS experiments, where the
+> **absolute ΔΔG values vary significantly across experiments**. However, we focus more on the
+> ranking and correlation within each DMS experiment.
+
+即：作者知道跨 assay 的 label 尺度不可比，声明只关心 within-DMS 排序，**但用的仍是裸 MSE**。这正是 §5.10 ⑤ 那个失效模式的配方。
+
+### ④ 论文的单 fold 是哪个 —— f0 排除，f1/f3 二选一，f3 更可能
+
+§4.1 原文：「the hardest inter-assay split, **focusing on the fold with the most multi-point mutations** for testing」。逐 fold 统计（`diagnostics/pin_fold.py`，突变数按 `bindinggym.py` 同一套逻辑解析 `mutant_pdb` dict）：
+
+| fold | held-out 行数 | ≥2 | ≥3 | ≥3 占比 | ≥100 行过滤后 ALL/<3/≥3 的 assay 数 |
+|---|---|---|---|---|---|
+| 0 | 114,341 | 100,129 | **0** | 0.0% | 6 / 6 / **0** ← 填不出 Table 2 的 ≥3 列 |
+| 1 | 55,081 | 54,819 | **54,324** | **98.6%** | 5 / 3 / 5 |
+| 2 | 29,332 | 18,118 | 11,091 | 37.8% | 5 / 5 / **1** |
+| 3 | **142,905** | **137,077** | 35,775 | 25.0% | 5 / 4 / 4 |
+| 4 | 34,787 | 31,165 | 30,822 | 88.6% | 4 / 4 / 3 |
+
+- **f0 直接排除**：≥3 切片一个 assay 都活不下来（max_mut = 2），Table 2 的 ≥3 列无从产生。
+- **「multi-point」= ≥3 ⇒ f1**（绝对数 54,324 与占比 98.6% 双第一）—— f1 **已跑完**，ALL Pearson 0.1108 vs 论文 0.3057。
+- **「multi-point」= ≥2 ⇒ f3**（137,077）—— f3 正是我们刚暂停的两个之一。
+
+尝试用 Table 2 的 RMSE 比值做第二个独立指纹（`diagnostics/rmse_sig2.py`）：所有 5 个方法都呈 `RMSE(≥3)/RMSE(ALL) ≈ 2.08–2.35`。若弱预测器的 RMSE 追随 label spread，这个比值应能反推 fold。结果 **两种口径、5 个 fold、外加 25-assay 全集，比值全在 0.75–1.52，没有一个接近 2.2 —— 此检验不成立，结论 inconclusive**，不能用来定 fold。
+
+但同一批数字给出一个较弱的旁证：论文 ALL RMSE = 1.1294，而各候选的 per-DMS label spread 是 f0 0.4614 / f1 0.4399 / f2 0.8941 / **f3 2.0090** / f4 0.6504 / 25-assay 0.8834。**只有 f3 的 label spread 大于论文 RMSE**（即论文的模型比「逐 assay 猜均值」更好）；在 f1 上论文的 RMSE 会比猜均值差 2.6 倍。这偏向 **f3**。
+
+### ⑤ 一个未解释的数据量差异
+
+§4.1 说 BindingGYM 有 **508,962 curated entries**，而官方仓库 shipped 的 25 个 assay 合计 **376,446 行**（§3.1b 审计过）。差 132,516 行（26%）。可能是论文在数 curation 前的总量，也可能他们用了我们手上没有的数据。**暂记待查，尚不影响当前结论。**
+
 ## 6. Change log
 
 - **2026-08-17 09:20**：写下 plan；数据下载、inter-assay split 复现、突变映射验证完成。
@@ -583,3 +649,4 @@ f1 的监控轨迹：
 _(待所有 job 完成后填写)_
 - **2026-08-24 12:5x**：f0/f3 walltime 18h/16h → **7h**（`scontrol update`，原地下调保住 5 天排队资历）；根因是 §5.5 的 K³ 外推高估约 3 倍，实测三个 fold 全部 ≤ 4:05:46。同时加入临时 chunked 脚本作为 7h 不够时的续跑兜底（§5.9）。
 - **2026-08-24 13:2x**：f0/f3 `scontrol hold` 暂停。零算力诊断（§5.10）：评测对齐经 119,200 行逐行验证无误；**推翻** §5.7/§5.8 的「学到 assay 尺度」解释（预测的 between-assay 方差仅 0.5–4.3%）；真实病因是**输出在前 5,000 iter 内塌缩成近似常数**；头号嫌疑是 `lr=4e-4`（作者 SKEMPI config 是 4e-5，10×），且 f1 未训练的 +0.3008 ≈ 论文 0.3057 提示 Table 2 可能是 zero-shot 口径。
+- **2026-08-24 13:4x**：读到论文原文（§5.11）。**撤回**「lr 抄错」猜测 —— A.4 原文确实是 4e-4/20k iter，但它与作者发布的 SKEMPI config（4e-5/38k）矛盾，而我们复现 Table 1 用的是后者。**撤回** zero-shot 假设 —— Table 2 里 ProteinMPNN 是独立 baseline（0.0998）。确认损失就是裸 MSE 且全文无 label 归一化，而 §4.3 作者明确承认跨 assay 尺度不可比。论文单 fold：f0 排除，≥3 口径指向 f1（已跑完，0.1108）、≥2 口径指向 f3（已暂停），RMSE 旁证偏向 f3。
