@@ -935,6 +935,62 @@ wrote ... (numpy 1.24.4 / sklearn 1.3.2)
 
 venv 保留在 scratchpad（`bgym_pin/`），后续若要在官方 pin 下复核任何数据侧结论可直接复用。
 
+## 5.17 更正一处无效比较，并把主线收敛到 f1（2026-08-24）
+
+### ① 更正：§5.14 ④ 的「官方比论文高 55%」不成立
+
+我曾写「BindingGYM 官方的 0.4217 比 H3-DDG 报告的 0.2725 高 55%」。**这是拿合并值比单 fold 值，不成立，作废。**
+
+两篇论文的口径已核实清楚：
+
+| | H3-DDG Table 2 | BindingGYM Table 5 |
+|---|---|---|
+| 评测范围 | **单个 fold** —— §4.1「the hardest inter-assay split, focusing on the fold with the most multi-point mutations」| **五个 fold 全跑、合并覆盖全部数据** —— §4.4「Using a five-fold inter-assay split allows us to generate predictions for **all data**」|
+| ALL Spearman | 0.2725（H3-DDG）| **0.42**（pretrained ProteinMPNN）/ 0.16（ProteinMPNN-R，随机初始化）|
+
+BindingGYM 论文 Table 5 的原文数字（ProteinMPNN）：ALL `0.42 / 0.70 / 0.16 / 0.72 / 0.23`，<3 `0.43/0.70/0.16/0.72/0.22`，≥3 `0.30/0.70/0.17/0.69/0.25`。仓库 `results/ProteinMPNN_finetune_inter_cluster_metric*.csv` 逐 assay 平均得 `0.4217/0.6995/0.1641/0.7182/0.2276` —— **逐位吻合，csv 就是 Table 5 的原始数据**。
+
+`main.py:355,624-625` 确认机制：`all_valid = []` 在 fold 循环外，循环内 `all_valid.append(fold_valid)`，最后写 `oof.csv` + 逐 assay `{DMS_id}_oof.csv`；`calc_metric.ipynb` 从这些 oof 文件算 25 行指标。**每个 assay 恰好 held-out 一次**（已核：25 行、出现次数均为 1、5 fold 全覆盖）。
+
+⚠️ **两篇论文没有交集**：BindingGYM Table 5 里没有 H3-DDG；H3-DDG Table 2 里那行 ProteinMPNN 是 **zero-shot**（0.2050），不是 Table 5 的微调结果。所以「H3-DDG 相对 BindingGYM 官方基线如何」两篇论文都没回答，只能我们自己在同一 fold 上跑。
+
+### ② 数据来源归属（§5.14 ④ 那张逐 fold 表）
+
+| 量 | 来源 |
+|---|---|
+| 逐 assay 的 Spearman/AUC/MCC/NDCG/AP | **BindingGYM 官方发布**（Table 5 的原始 csv）|
+| 「per-assay 等权平均」聚合口径 | **BindingGYM 官方**（`calc_metric.ipynb`）|
+| **逐 fold 分组与分项均值** | **本记录重构** —— 官方 csv 只有 `DMS_id,Spearman,AUC,MCC,NDCG,AP` 六列、**无 fold 列**，两篇论文均**未发布逐 fold 数字** |
+
+重构合法性依据：(a) 是 OOF，每 assay 恰好 held-out 一次；(b) 我们的 fold 划分与官方完全一致（§5.16 在其 `BindingGYM.yml` pin 下重算，`diff` 0 行）。
+
+### ③ 再更正：指向 f1 的证据不是「三条独立」
+
+我曾称有「三条互相独立的证据」指向 f1。**不对。**
+
+- **独立的只有一条**：f1 的 ≥3 突变数 54,324 行、占比 98.6%，绝对数与占比双第一 —— 来自原始 DMS 数据。
+- 「f1 是官方跑得最差的 fold（0.2719，5 个里最低）」与「官方 f1 = 0.2719 ≈ 论文 0.2725」**同出于②的那一个重构**，是同一派生量的两个侧面，不是两条证据。
+
+且数值线索本身有弱点：f1 的 ≥3 切片对不上（重构值 0.1497 vs 论文 0.2755，差 0.126），只有 ALL 切片对得极准（差 0.0006）。若真是同一 fold 且两模型水平相近，三个切片应当都接近。
+
+**要硬判定，只能我们自己在 f1 上跑，用同一模型同一代码的三个切片去比论文的三个切片** —— 比拿 ProteinMPNN 当代理硬得多。
+
+### ④ 主线收敛到 f1
+
+用户决定：取消全部在排任务，只保留 f1。
+
+- 取消：`50820222`(strategy f0)、`50820223`(strategy f2)
+- 此前已 `scancel`：`50680591`/`50680595`（A.4 臂 f0/f3）、`50817084`/`50817085`（untrained baseline f1/f3）
+- **新提交：`50829137`，strategy 臂，评测 fold = f1，7h**
+
+对标基准（f1，ALL / <3 / ≥3 的 Spearman）：
+
+| | ALL | <3 | ≥3 |
+|---|---|---|---|
+| H3-DDG 论文 Table 2 | **0.2725** | 0.3031 | 0.2755 |
+| 官方 ProteinMPNN 微调（本记录重构的 f1 分项）| 0.2719 | 0.3422 | 0.1497 |
+| 我们 A.4 臂在 f1 的实测 | **0.0904** | 0.1149 | 0.1193 |
+
 ## 6. Change log
 
 - **2026-08-17 09:20**：写下 plan；数据下载、inter-assay split 复现、突变映射验证完成。
@@ -959,3 +1015,4 @@ _(待所有 job 完成后填写)_
 - **2026-08-24 15:2x**：根因定位到训练策略（§5.14）。label 方向三重验证无误；查出 4 个 gain-of-function assay（`5A12_VEGF` WT 在 0.02 分位、占 f4 的 86%），解释 f4 为负。官方 inter-assay 策略 = 同 assay batch + listMLE + assay 均匀采样，三个机制我全缺；`batch_size=1` 使 listMLE 恒为 0，故 A.4 口径结构上无法表达该策略。🔴 **官方发布的「朴素 ProteinMPNN + 其策略」ALL Spearman 0.4217，比 H3-DDG 论文的 0.2725 高 55%**，且 Table 2 的 ProteinMPNN 行是 zero-shot 版。已实现 `train_bindinggym_official.py` 并提交 `50818834`(f0)/`50818835`(f2)。
 - **2026-08-24 16:0x**：按用户指正修正归属划分（§5.15）。撤销 `50818834`/`50818835`（把 BindingGYM 优化器一起搬了，混淆了「策略」与「优化器」）。新 config `train_h3-ddg_bindinggym_strategy.json`：模型结构与训练参数全部 H3-DDG（Adam/4e-4/wd 0/19,968 步/batch 2），只有 data loading 与训练策略取自 BindingGYM。实测 slate 1 = 11.00 GiB、slate 2 ≈ 22 GiB，40 GB a100 有 1.8× 余量，且**反证 A.4 的 "batch size 1, 2" 在 24 GB RTX 4090 上正好卡这个界**。提交 `50820222`(f0) / `50820223`(f2)。本地预览已 kill。
 - **2026-08-24 16:3x**：三问核实（§5.16）。(a) 6 个作业全部 inter-assay，共用固化的 fold tsv + assay 级泄漏断言，从未提交 intra-assay。(b) 「官方靶子 0.4217」= **pretrained ProteinMPNN（同一份 v_48_020）+ 官方 listMLE 策略微调**；`-R` 后缀是随机初始化（0.1585），故预训练权重单独贡献 0.263。(c) **实测**在 BindingGYM 官方 pin（numpy 1.24.4 / sklearn 1.3.2）下重算 fold，fingerprint 与 committed tsv `diff` 0 行 —— 划分同时与两篇论文拉齐，**不存在二选一**；只有 numpy ≥2 才偏离且已被 guard 拦住。
+- **2026-08-24 17:1x**：**更正两处**（§5.17）：(a) 「官方 0.4217 比论文 0.2725 高 55%」作废 —— H3-DDG Table 2 是单 fold，BindingGYM Table 5 是五 fold 合并覆盖全部数据，两者不可直接比；(b) 指向 f1 的证据只有一条独立（≥3 突变数双第一），另两条同出于同一重构。核实 BindingGYM 论文 Table 5 原文为 ProteinMPNN ALL 0.42、ProteinMPNN-R 0.16，与仓库 csv 逐位吻合。用户决定收敛主线：取消全部在排任务，**只提交 `50829137`（strategy 臂，f1，7h）**。
