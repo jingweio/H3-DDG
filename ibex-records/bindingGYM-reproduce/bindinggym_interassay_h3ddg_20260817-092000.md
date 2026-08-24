@@ -631,6 +631,49 @@ Table 2 里 **ProteinMPNN 是一行独立的 baseline**：ALL Pearson 0.0998 / S
 
 §4.1 说 BindingGYM 有 **508,962 curated entries**，而官方仓库 shipped 的 25 个 assay 合计 **376,446 行**（§3.1b 审计过）。差 132,516 行（26%）。可能是论文在数 curation 前的总量，也可能他们用了我们手上没有的数据。**暂记待查，尚不影响当前结论。**
 
+## 5.12 未训练 baseline（pretrained ProteinMPNN + 未训练 H3-DDG 头）—— 已提交
+
+### 为什么需要它
+
+§5.10 证明训练后的模型逐 assay 相关性与零不可区分（7 正 7 负，均值 +0.0180），输出塌缩成近似常数。**要判断「pipeline 本身能不能产出信号」，就必须有一个不经训练的参照点。** 目前手上只有 iter-1 的 1,000 行监控子样本（f1 +0.3008 / f2 +0.0934 / f4 +0.1230），噪声太大，且 f1 那个 +0.3008 高得可疑 —— 是论文 ProteinMPNN 行（0.0998）的 3 倍、BA-Cycle（0.1320）的 2.3 倍。
+
+### 为什么选 f1 和 f3
+
+论文只跑单 fold（§5.11 ④）。f0 已排除；「multi-point」= ≥3 ⇒ f1，= ≥2 ⇒ f3。**这两个就是全部候选**，所以只跑这两个。
+
+### 实现
+
+`train_bindinggym.py` 新增 `--eval_only`：跳过整个训练循环与 checkpoint 保存，直接评测初始化后的模型。两处安全设计：
+- 输出一律加 `_untrained` 后缀 → baseline 与正式 run 共用 `--save_dir` 也不会互相覆盖；
+- `--eval_only` 与 `--resume` 互斥并直接报错 → 不会把权重悄悄加载进一个号称「未训练」的模型。
+
+本地 A4500 smoke 通过（`--max_eval_batches 6`，`FINAL fold1_untrained` 正常产出，无训练日志）。
+
+### 已提交
+
+| job | fold | walltime | 依据 |
+|---|---|---|---|
+| `50817084` | 1 | 02:30:00 | 55,081 行，按 a100 实测 eval ~1.0h |
+| `50817085` | 3 | 05:00:00 | 142,905 行，~2.6h |
+
+脚本：`sh/bindinggym_untrained_baseline_20260824.sh` + `sh/submit_untrained_baseline.sh`。输出写到独立的 `results/bindinggym_untrained_fold{F}/`，**不触碰**已训练 fold 的产物，也不触碰 f0/f3 的 resume checkpoint。
+
+同时在本地 A4500 跑一份**预览**（scratchpad，永不进 `results/`、永不作为报告数字，仅为提前知道方向）。
+
+### 判读标准（先写死，避免事后找解释）
+
+| 未训练全量结果 | 结论 |
+|---|---|
+| ALL Pearson ≈ 0.3 | pipeline 能产出信号，问题在训练配方；且未训练就已达论文水平，需解释论文 ProteinMPNN 行只有 0.0998 |
+| ≈ 0.10–0.15 | 与论文 ProteinMPNN(0.0998) / BA-Cycle(0.1320) 一致，pipeline 正常，训练把它训坏了 |
+| ≈ 0 | pipeline 仍有 bug；iter-1 的 +0.3008 是子样本运气 |
+
+### 关于 fold 划分的确认边界（用户提问）
+
+- **已验证**：fold 成员固化于 `data_splits/inter_assay_folds.tsv`，md5 `d23e15f9f54e6b339e833600c12ff673` 与 guard 期望值一致；两篇论文各自声明的 env（numpy 1.22.4 / 1.24.4）都产出同一份划分；生成逻辑逐字对应 BindingGYM `training/main.py:348`；自 `383b0e8` 未改动。
+- **无法验证**：H3-DDG 作者是否用的就是这一份 —— 他们**没有发布任何 BindingGYM 代码**。可声称的最强命题是「这是 BindingGYM 官方代码在两篇论文 pinned env 下的产物」。
+- **⚠ 不在验证范围内**：`data_splits/assay_chain_sides.tsv` 是**我自己整理**的 25 行表，定义热力学循环的两个 side。BindingGYM 官方仓库没有它（他们的模型是序列模型，不做热力学循环）。**这是整套 setup 里最大的一块没有外部交叉验证的判断**，尤其是 4 个 Z-domain assay 两侧都有突变的情形 —— 而 f1 恰好全是 Z-domain。
+
 ## 6. Change log
 
 - **2026-08-17 09:20**：写下 plan；数据下载、inter-assay split 复现、突变映射验证完成。
@@ -650,3 +693,4 @@ _(待所有 job 完成后填写)_
 - **2026-08-24 12:5x**：f0/f3 walltime 18h/16h → **7h**（`scontrol update`，原地下调保住 5 天排队资历）；根因是 §5.5 的 K³ 外推高估约 3 倍，实测三个 fold 全部 ≤ 4:05:46。同时加入临时 chunked 脚本作为 7h 不够时的续跑兜底（§5.9）。
 - **2026-08-24 13:2x**：f0/f3 `scontrol hold` 暂停。零算力诊断（§5.10）：评测对齐经 119,200 行逐行验证无误；**推翻** §5.7/§5.8 的「学到 assay 尺度」解释（预测的 between-assay 方差仅 0.5–4.3%）；真实病因是**输出在前 5,000 iter 内塌缩成近似常数**；头号嫌疑是 `lr=4e-4`（作者 SKEMPI config 是 4e-5，10×），且 f1 未训练的 +0.3008 ≈ 论文 0.3057 提示 Table 2 可能是 zero-shot 口径。
 - **2026-08-24 13:4x**：读到论文原文（§5.11）。**撤回**「lr 抄错」猜测 —— A.4 原文确实是 4e-4/20k iter，但它与作者发布的 SKEMPI config（4e-5/38k）矛盾，而我们复现 Table 1 用的是后者。**撤回** zero-shot 假设 —— Table 2 里 ProteinMPNN 是独立 baseline（0.0998）。确认损失就是裸 MSE 且全文无 label 归一化，而 §4.3 作者明确承认跨 assay 尺度不可比。论文单 fold：f0 排除，≥3 口径指向 f1（已跑完，0.1108）、≥2 口径指向 f3（已暂停），RMSE 旁证偏向 f3。
+- **2026-08-24 14:3x**：新增 `--eval_only`，提交未训练 baseline `50817084`(f1, 2:30h) / `50817085`(f3, 5:00h)（§5.12），判读标准已先行写死。同时确认 fold 划分的验证边界：成员固化且 fingerprint 通过，但 `assay_chain_sides.tsv` 是自建、无外部交叉验证。
