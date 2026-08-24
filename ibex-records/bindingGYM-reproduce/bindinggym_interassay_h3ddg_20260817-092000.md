@@ -878,6 +878,63 @@ A.4 原文是 "a batch size of **1, 2**"，而 **listMLE 至少需要 2**（单�
 
 用户要求不耽误主线，本地 A4500 上的 untrained baseline 预览（f1，已跑 1h01m）已 kill，GPU 释放。未训练 baseline 的正式数字改由 Ibex 的 `50817084`/`50817085`（仍 hold）提供。
 
+## 5.16 三问核实：split 归属、官方靶子的确切定义、fold 划分的版本无关性（2026-08-24）
+
+### ① 所有 Ibex 作业都是 inter-assay split
+
+| job | 脚本 | config | 训练 | 评测 |
+|---|---|---|---|---|
+| `50820222` / `50820223` | `train_bindinggym_official.py` | `..._strategy.json` | 4 个 cluster 的 20 assay | held-out cluster（f0 / f2）|
+| `50680591` / `50680595`（hold）| `train_bindinggym.py` | `..._bindinggym.json`（A.4）| 同上 | f0 / f3 |
+| `50817084` / `50817085`（hold）| `train_bindinggym.py --eval_only` | 同上 | **不训练** | f1 / f3 |
+
+**全部**通过 `BindingGYMDataset` 读同一份 `data_splits/inter_assay_folds.tsv`，且 `bindinggym.py:152` 有 assay 级泄漏断言 `assert not (train_ids & val_ids)`。**从未提交过 intra-assay 作业。** 两个 untrained baseline 不训练，所以「inter-assay」只作用在评测侧 —— 但 held-out 集合用的是同一套 fold 定义。
+
+### ② 「官方靶子」的确切定义
+
+`BindingGYM/results/ProteinMPNN_finetune_inter_cluster_metric*.csv`，即：
+
+- **模型**：`ProteinMPNN(ca_only=False, num_letters=21, node_features=128, edge_features=128, hidden_dim=128, num_encoder_layers=3, num_decoder_layers=3, augment_eps=0.2, k_neighbors=48)`（`main.py:363`）
+- **权重**：`--use_weight pretrained` → `cache/v_48_020.pt` —— **与 H3-DDG backbone 同一份权重**
+- **是** pretrained ProteinMPNN，**监督微调**（非 zero-shot），用 listMLE
+- **split**：`--mode inter --split cluster` → 同一个 GroupKFold cluster 5-fold
+- **文件后缀**（从 `calc_metric.ipynb` 核实）：无后缀 = **ALL**；`_oneORtwo` = `len(mutant.split(':')) < 3` 即 **<3**；`_multi` = **≥3**；每切片 **≥100 行**过滤 —— 与 `bindinggym_metrics.py` 的实现一致
+
+**`-R` 后缀 = 随机初始化**（`--use_weight native`）。notebook 把 `ProteinMPNN-R` 的 zero-shot 硬编码成 Spearman 0 / AUC 0.5，因为随机初始化无 zero-shot 能力。
+
+| 模型（全 25 assay 等权 per-DMS Spearman）| ALL |
+|---|---|
+| **ProteinMPNN（pretrained）+ 官方策略微调** | **0.4217** ← 我们的靶子 |
+| ESM2（pretrained）+ 官方策略微调 | 0.3024 |
+| **ProteinMPNN-R（随机初始化）+ 同样微调** | **0.1585** |
+| ESM2-R（随机初始化）| 0.0946 |
+| H3-DDG 论文 Table 2 | 0.2725 |
+| Table 2 的 ProteinMPNN 行（**zero-shot**）| 0.2050 |
+
+顺带一个有用的量：**预训练权重本身贡献 0.4217 − 0.1585 = 0.263**，是这个任务上最大的单一因素。而 H3-DDG 报的 0.2725 介于「随机初始化微调」(0.1585) 与「预训练微调」(0.4217) 之间。
+
+### ③ fold 划分与 BindingGYM 官方**同时**拉齐 —— 不存在二选一
+
+这一条我之前只在 docstring 里断言过，现在**实测**：建了一个 BindingGYM 官方 pin 的 venv（`numpy==1.24.4 / scikit-learn==1.3.2 / pandas==2.0.3 / scipy==1.10.1`，取自 `BindingGYM.yml`），在其中重跑 `make_inter_assay_folds.py`：
+
+```
+fingerprint d23e15f9f54e6b339e833600c12ff673 matches the committed split
+wrote ... (numpy 1.24.4 / sklearn 1.3.2)
+```
+与已固化的 tsv `diff` → **0 行差异**。
+
+决定 tie 的那一步（`np.argsort(n_samples_per_group)[::-1]`，权重向量 `[1,2,1,1,1,1,1,2,1,6,2,1,4,1]`，14 个里 12 个并列）的实测输出：
+
+| env | argsort 结果 |
+|---|---|
+| numpy 1.22.4 / sklearn 1.2.1（**H3-DDG README pin**，我们在用）| `[9,12,10,7,1,13,11,8,6,5,4,3,2,0]` |
+| numpy 1.24.4 / sklearn 1.3.2（**BindingGYM.yml pin**）| `[9,12,10,7,1,13,11,8,6,5,4,3,2,0]` —— **完全相同** |
+| numpy 2.3.5 / sklearn 1.7.2（base env）| `[9,12,10,7,1,13,`**`8,11,5,6`**`,4,3,2,0]` —— 第 6–9 位不同 |
+
+**结论：划分本身就是 BindingGYM 官方的**（逐字调用其 `main.py:348` 的 `GroupKFold(n_splits=5).split(clusters, groups=clusters)`，cluster 表用官方 shipped 的 `BindingGYM_cluster.tsv`），而它在**两篇论文各自声明的 env 下产出同一份结果**。所以不是「我们选了 H3-DDG 的版本」—— **没有可选的东西**，两边一致。只有 numpy ≥2 才会偏离，而那不是任何一篇论文声明的环境，且已被 `make_inter_assay_folds.py` 的 fingerprint guard 拦住。
+
+venv 保留在 scratchpad（`bgym_pin/`），后续若要在官方 pin 下复核任何数据侧结论可直接复用。
+
 ## 6. Change log
 
 - **2026-08-17 09:20**：写下 plan；数据下载、inter-assay split 复现、突变映射验证完成。
@@ -901,3 +958,4 @@ _(待所有 job 完成后填写)_
 - **2026-08-24 15:0x**：`assay_chain_sides.tsv` 验证通过（§5.13）—— 25/25 过四项检查；三个 Fab 案例的 side 内接触是跨 side 界面的 2.4–5.3 倍，证明「轻+重链合为一个 side」切在正确的缝上；4 个 Z-domain 的双侧突变确认。**数据侧至此无已知疑点**，问题收紧到训练配置。
 - **2026-08-24 15:2x**：根因定位到训练策略（§5.14）。label 方向三重验证无误；查出 4 个 gain-of-function assay（`5A12_VEGF` WT 在 0.02 分位、占 f4 的 86%），解释 f4 为负。官方 inter-assay 策略 = 同 assay batch + listMLE + assay 均匀采样，三个机制我全缺；`batch_size=1` 使 listMLE 恒为 0，故 A.4 口径结构上无法表达该策略。🔴 **官方发布的「朴素 ProteinMPNN + 其策略」ALL Spearman 0.4217，比 H3-DDG 论文的 0.2725 高 55%**，且 Table 2 的 ProteinMPNN 行是 zero-shot 版。已实现 `train_bindinggym_official.py` 并提交 `50818834`(f0)/`50818835`(f2)。
 - **2026-08-24 16:0x**：按用户指正修正归属划分（§5.15）。撤销 `50818834`/`50818835`（把 BindingGYM 优化器一起搬了，混淆了「策略」与「优化器」）。新 config `train_h3-ddg_bindinggym_strategy.json`：模型结构与训练参数全部 H3-DDG（Adam/4e-4/wd 0/19,968 步/batch 2），只有 data loading 与训练策略取自 BindingGYM。实测 slate 1 = 11.00 GiB、slate 2 ≈ 22 GiB，40 GB a100 有 1.8× 余量，且**反证 A.4 的 "batch size 1, 2" 在 24 GB RTX 4090 上正好卡这个界**。提交 `50820222`(f0) / `50820223`(f2)。本地预览已 kill。
+- **2026-08-24 16:3x**：三问核实（§5.16）。(a) 6 个作业全部 inter-assay，共用固化的 fold tsv + assay 级泄漏断言，从未提交 intra-assay。(b) 「官方靶子 0.4217」= **pretrained ProteinMPNN（同一份 v_48_020）+ 官方 listMLE 策略微调**；`-R` 后缀是随机初始化（0.1585），故预训练权重单独贡献 0.263。(c) **实测**在 BindingGYM 官方 pin（numpy 1.24.4 / sklearn 1.3.2）下重算 fold，fingerprint 与 committed tsv `diff` 0 行 —— 划分同时与两篇论文拉齐，**不存在二选一**；只有 numpy ≥2 才偏离且已被 guard 拦住。
