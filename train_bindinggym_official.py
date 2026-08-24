@@ -353,6 +353,15 @@ def main():
         start_epoch, best, stale = blob['epoch'] + 1, blob['best'], blob['stale']
         say(f'[resume] epoch {blob["epoch"]} done; best per-DMS Spearman {best:.4f}; '
             f'continuing at {start_epoch}/{args.max_epochs}')
+        if stale >= args.patience:
+            # Early stopping had already fired before the kill, so the run was in its final
+            # evaluation. The patience check sits at the END of the loop body, so re-entering
+            # the loop would train one more epoch before noticing -- and if that epoch happened
+            # to beat `best` it would overwrite best_fold*.pt, making a killed-and-resumed run
+            # select different weights from an uninterrupted one. Skip straight to evaluation.
+            say(f'[resume] early stopping had already fired (stale {stale}/{args.patience}); '
+                f'skipping training, going straight to the final evaluation')
+            start_epoch = args.max_epochs
 
     for epoch in range(start_epoch, args.max_epochs):
         sampler.set_epoch(epoch)
