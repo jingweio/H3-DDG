@@ -1,0 +1,53 @@
+#!/bin/bash
+#SBATCH --gres=gpu:a100:1
+#SBATCH --cpus-per-task=12
+#SBATCH --mem=128G
+#SBATCH --output=/ibex/user/guoj0f/H3-DDG/reproduce/ibex-records/bindingGYM-reproduce/official_strategy_20260824_%x_%j.out
+#SBATCH --error=/ibex/user/guoj0f/H3-DDG/reproduce/ibex-records/bindingGYM-reproduce/official_strategy_20260824_%x_%j.err
+
+# H3-DDG model, BindingGYM's OWN inter-assay training strategy (within-assay batches + listMLE +
+# uniform assay sampling + AdamW/OneCycleLR + early stopping on per-DMS Spearman).
+#
+# The A.4-faithful arm (sh/bindinggym_perfold_20260819.sh) collapses: output goes near-constant
+# inside 5,000 iterations and the 14-assay mean Spearman is -0.0052.  BindingGYM's own published
+# result for a pretrained ProteinMPNN fine-tuned under this exact split is 0.4217 ALL Spearman
+# (results/ProteinMPNN_finetune_inter_cluster_metric.csv), so the strategy demonstrably works on
+# this data with this backbone.  Per-fold official targets, from that same file:
+#     f0 0.5542   f1 0.2719   f2 0.3035   f3 0.5550   f4 0.3916
+# A run that lands near its fold's target confirms the strategy is the fix; one that lands near
+# zero says something else is wrong.
+#
+# Resumable: --resume continues from the last completed epoch.
+
+set -euo pipefail
+
+FOLD=$1
+
+source /ibex/user/guoj0f/anaconda3/etc/profile.d/conda.sh
+conda activate h3ddg-reproduce
+cd /ibex/user/guoj0f/H3-DDG/reproduce
+
+SAVE_DIR=./results/bindinggym_official_fold${FOLD}
+
+echo "=== official strategy | fold ${FOLD} | job ${SLURM_JOB_ID} ==="
+python - <<'PY'
+import torch, numpy, pandas, sklearn, Bio
+print('torch', torch.__version__, '| cuda', torch.version.cuda, '| gpu', torch.cuda.get_device_name(0))
+print('numpy', numpy.__version__, '| sklearn', sklearn.__version__, '| biopython', Bio.__version__)
+print('gpu mem (GiB)', round(torch.cuda.get_device_properties(0).total_memory / 2**30, 1))
+assert sklearn.__version__ in ('1.2.1', '1.3.2'), 'fold split is sklearn-version sensitive'
+PY
+
+for f in ./data/BindingGYM_cache/entries.pkl ./data/BindingGYM_cache/structures.pkl; do
+  test -s "$f" || { echo "FATAL: missing cache $f"; exit 1; }
+done
+
+export WANDB_MODE=disabled
+srun python train_bindinggym_official.py \
+  --config_path ./config/train_h3-ddg_bindinggym_official.json \
+  --test_fold "${FOLD}" \
+  --save_dir "${SAVE_DIR}" \
+  --resume \
+  --num_workers 12
+
+echo "=== fold ${FOLD} official strategy DONE ==="

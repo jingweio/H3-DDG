@@ -722,6 +722,90 @@ Table 2 里 **ProteinMPNN 是一行独立的 baseline**：ALL Pearson 0.0998 / S
 
 **数据侧已无已知疑点。** 这把 §5.10 的结论进一步收紧：问题在训练配置，不在管线。
 
+## 5.14 根因定位：训练策略，且有官方发布结果作为量化靶子（2026-08-24）
+
+### ① label 方向没有问题（三重独立验证）
+
+| 证据 | 内容 |
+|---|---|
+| curation 层 | BindingGYM `utils/data_utils.py:25`：`DMS_score = raw_phenotype * DMS_directionality` —— 方向在建库时就归一化了 |
+| 官方代码层 | `training/dataset.py`：`reg_label = -ddg if 'DMS_score' not in columns else DMS_score` —— 官方把 `-ddg` 与 `DMS_score` 当同一个量，即 **`ddg = -DMS_score`**，正是 `bindinggym.py` 的 `label_sign = -1` |
+| 数据层（我独立验）| 22 个有 WT 行的 assay 中 **18 个** WT 分位 ≥50%（多在 87–99%）；25 个中 21 个 `ρ(突变数, score) ≤ 0`；**flipped-sign 候选 0 个**（`diagnostics/verify_direction.py`）|
+
+**(1) 结论：无符号问题，`ddG_true = -DMS_score` 正确且已外部确认。**
+
+### ② 但查出第三种失效模式：4 个 gain-of-function assay
+
+| assay | WT 分位 | ρ(突变数, score) | 所在 fold | 占该 fold |
+|---|---|---|---|---|
+| `5A12_VEGF_fitness_4ZFF` | **0.02%**（29,981 行库里最差）| **+0.417** | 4 | **86%** |
+| `CD19_FMC63_Fitness_7URV` | 29.7% | **+0.735** | 3 | 3% |
+| `hYAP65_peptide` | 35.4% | **+0.495** | 2 | **63%** |
+| `ACE2_SARS2-RBD_enrich_6M17` | 44.3% | — | 2 | 7% |
+
+H3-DDG 的预测由 ProteinMPNN 的负对数似然构成（论文式 16），而似然奖励的是「这个残基在此结构语境下像天然的」。**在 gain-of-function 库里野生型恰恰是最差的结合体**，所以「像天然」与结合强度反相关 —— **zero-shot 的 inverse-folding 打分在这些 assay 上按构造是反的**。
+
+对得上我们的结果：f4 是唯一为负的 fold（−0.1103），而 `5A12_VEGF` 单独就是 −0.1617 且占该 fold 86%。
+
+⚠️ 但**这条只适用于 zero-shot**：官方微调后在 `5A12_VEGF` 上拿到 Spearman **+0.4460**（见④），说明 ranking 损失能翻转这个先验。
+
+### ③ (2) 我的训练策略 vs 官方 —— 三个机制全缺
+
+| | BindingGYM 官方 inter | **我当前（A.4 口径）** | H3-DDG 论文 A.4 |
+|---|---|---|---|
+| batch 组成 | **同一 assay 的 8 条** | 20 assay 混采的 1 条 | batch size 1, 2 |
+| 采样权重 | **assay 均匀**（GB1 92,891 行与 BH3 518 行等权）| **按行数比例**（KRAS/GB1 拿走几乎全部梯度）| — |
+| loss | **listMLE**（listwise ranking，尺度无关）| **裸 MSE on raw ddG** | MSE（式 17）|
+| optimizer | AdamW 1e-3, betas (0.9,0.99), wd 0.05, OneCycleLR | Adam 4e-4, wd 0 | Adam 4e-4 |
+| 训练量 | 256 步/epoch × ≤100 epoch, patience 3 | 20,000 步一口气 | 20,000 iter |
+| 模型选择 | **valid per-DMS Spearman** | **无**（取最后一步）| — |
+| backbone | ProteinMPNN `v_48_020`, augment_eps 0.2 | 同一份权重, backbone_noise 0 | 同一份 |
+
+来源：`/home/guoj0f/repos/BindingGYM/training/{main.py:346-403,579, dataset.py:77-84, loss.py, run.sh}`。
+
+**一个纯逻辑上的关键点：`batch_size=1` 时 listMLE 恒等于 0** —— 单元素列表没有排序可学。所以 **A.4 声明的「MSE + batch_size 1」在结构上根本无法表达官方策略**。（本地 smoke 里内存压力把 batch 压到 1，日志正好打出 `listMLE 0.000000`，而模型仍在退化 —— 因为 AdamW 的 `weight_decay=0.05` 与梯度无关地衰减权重。已给探测加下界 2。）
+
+**另记一笔官方协议自身的问题**：`main.py` 的 `fold_valid = split[fold][1]` 就是**测试 fold**，而第 579 行按 `valid_metrics['spearman']` 选 epoch —— **官方是在测试集上做模型选择**，其发布数值含 early-stopping oracle。我们复现其协议时照做，但必须标注。
+
+### ④ 量化靶子：官方发布了同 backbone、同 split、同策略的结果
+
+`BindingGYM/results/ProteinMPNN_finetune_inter_cluster_metric*.csv` —— **pretrained ProteinMPNN 在 inter-assay cluster split 下按其策略微调**的逐 assay 结果：
+
+| slice | 官方 ProteinMPNN 微调 | H3-DDG 论文 Table 2 | Table 2 的 ProteinMPNN 行（**zero-shot**）|
+|---|---|---|---|
+| ALL Spearman | **0.4217** | 0.2725 | 0.2050 |
+| <3 | **0.4254** | 0.3031 | 0.2439 |
+| ≥3 | 0.3043 | 0.2755 | 0.1614 |
+
+🔴 **BindingGYM 官方的「朴素 ProteinMPNN + 他们的策略」（0.4217）比 H3-DDG 论文报告的 0.2725 高 55%。** 而 Table 2 里那行 ProteinMPNN（0.2050）是 **zero-shot** 版本，不是这个微调结果 —— 即 H3-DDG 没有与 BindingGYM 自己发布的、更强的同 backbone 监督基线对比。
+
+**逐 fold 靶子**（由该文件按我们固化的 fold 划分聚合）：
+
+| fold | 官方 ALL Spearman |
+|---|---|
+| 0 | **0.5542** |
+| 1 | 0.2719 |
+| 2 | 0.3035 |
+| 3 | **0.5550** |
+| 4 | 0.3916 |
+
+**14 个重叠 assay 逐个对比：官方等权 Spearman 0.3174，我们 −0.0052，差 0.3225。** 差距最大的是 `BH3_Mcl-1`（+1.08）、`BH3_Bcl-xL`（+0.80）、`5A12_VEGF`（+0.61）。
+
+**我们反超官方的有两个**，都是 Z-domain 双侧突变 assay：`ZpA963_HL1`（我们 0.4542 vs 官方 0.1721）、`ZSPA-1_LL1`（0.2127 vs 0.0121）。官方是纯序列/结构打分，不做热力学循环；这两个 assay 两侧都突变，正是循环该发挥作用的地方 —— 这是 H3-DDG 路线一个真实（虽窄）的优势。
+
+### ⑤ (3) 已实现并提交
+
+`train_bindinggym_official.py` + `config/train_h3-ddg_bindinggym_official.json`（独立文件，`train_bindinggym.py` 未动）。实现要点与两个新发现见该文件头注释与 commit `0a7d472`：
+
+- **`batch_size 8` 在 a100 上也可能放不下** —— H3-DDG 在 BindingGYM 的朴素 ProteinMPNN 之上多了 O(K²) 的 3-body triplet attention。这**反过来解释了 A.4 那句 "batch size of 1, 2, depending on GPU memory and graph size"**。改为开跑前对**最大结构的 assay** 探测一次并固定，而不是训练中动态切分（切分已 collate 的 batch 涉及 per-item / per-row 下标，出错会污染 label 而不只是崩溃）。
+- 探测下界 2（见③的 listMLE 退化）。
+
+**提交的 fold：`50818834`(f0) 与 `50818835`(f2)**，各 7h。
+- **f2 是实测最快的 fold**（29,332 行，2:31:51）—— 用户要求的那个。但它 63% 是 `hYAP65`（gain-of-function），官方靶子只有 0.3035。
+- **f0 官方靶子最高（0.5542）**，是信噪比最好的判据：跑出 ~0.55 则策略是解、我们的实现正确；跑出 ~0 则另有问题。代价只是 final eval 多 1.6h。
+
+两个都跑，正好把「策略是否是解」与「该 fold 是否本身对抗」分开。
+
 ## 6. Change log
 
 - **2026-08-17 09:20**：写下 plan；数据下载、inter-assay split 复现、突变映射验证完成。
@@ -743,3 +827,4 @@ _(待所有 job 完成后填写)_
 - **2026-08-24 13:4x**：读到论文原文（§5.11）。**撤回**「lr 抄错」猜测 —— A.4 原文确实是 4e-4/20k iter，但它与作者发布的 SKEMPI config（4e-5/38k）矛盾，而我们复现 Table 1 用的是后者。**撤回** zero-shot 假设 —— Table 2 里 ProteinMPNN 是独立 baseline（0.0998）。确认损失就是裸 MSE 且全文无 label 归一化，而 §4.3 作者明确承认跨 assay 尺度不可比。论文单 fold：f0 排除，≥3 口径指向 f1（已跑完，0.1108）、≥2 口径指向 f3（已暂停），RMSE 旁证偏向 f3。
 - **2026-08-24 14:3x**：新增 `--eval_only`，提交未训练 baseline `50817084`(f1, 2:30h) / `50817085`(f3, 5:00h)（§5.12），判读标准已先行写死。同时确认 fold 划分的验证边界：成员固化且 fingerprint 通过，但 `assay_chain_sides.tsv` 是自建、无外部交叉验证。
 - **2026-08-24 15:0x**：`assay_chain_sides.tsv` 验证通过（§5.13）—— 25/25 过四项检查；三个 Fab 案例的 side 内接触是跨 side 界面的 2.4–5.3 倍，证明「轻+重链合为一个 side」切在正确的缝上；4 个 Z-domain 的双侧突变确认。**数据侧至此无已知疑点**，问题收紧到训练配置。
+- **2026-08-24 15:2x**：根因定位到训练策略（§5.14）。label 方向三重验证无误；查出 4 个 gain-of-function assay（`5A12_VEGF` WT 在 0.02 分位、占 f4 的 86%），解释 f4 为负。官方 inter-assay 策略 = 同 assay batch + listMLE + assay 均匀采样，三个机制我全缺；`batch_size=1` 使 listMLE 恒为 0，故 A.4 口径结构上无法表达该策略。🔴 **官方发布的「朴素 ProteinMPNN + 其策略」ALL Spearman 0.4217，比 H3-DDG 论文的 0.2725 高 55%**，且 Table 2 的 ProteinMPNN 行是 zero-shot 版。已实现 `train_bindinggym_official.py` 并提交 `50818834`(f0)/`50818835`(f2)。
