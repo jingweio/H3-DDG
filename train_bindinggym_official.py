@@ -351,6 +351,22 @@ def main():
         if sched is not None and blob.get('sched') is not None:
             sched.load_state_dict(blob['sched'])
         start_epoch, best, stale = blob['epoch'] + 1, blob['best'], blob['stale']
+        # Restore the RNG streams too, not just the weights. ProteinMPNN draws a random decoding
+        # order from the global torch RNG on EVERY forward (protein_mpnn_utils.py:1587, inside the
+        # misleadingly named deterministic_forward), so an uninterrupted run has advanced that
+        # stream by thousands of draws by the time it reaches epoch N. Without this, a resumed run
+        # replays the stream from set_seed() and diverges from epoch N onward -- measured on a toy
+        # fold-2 run, where it selected a different epoch's weights (0.3600 vs 0.4158).
+        if blob.get('rng') is not None:
+            r = blob['rng']
+            torch.set_rng_state(r['torch'])
+            np.random.set_state(r['numpy'])
+            if torch.cuda.is_available() and r.get('cuda') is not None:
+                torch.cuda.set_rng_state_all(r['cuda'])
+            say('[resume] RNG streams restored')
+        else:
+            say('[resume] WARNING: checkpoint predates RNG capture; this run will diverge '
+                'from an uninterrupted one after this epoch')
         say(f'[resume] epoch {blob["epoch"]} done; best per-DMS Spearman {best:.4f}; '
             f'continuing at {start_epoch}/{args.max_epochs}')
         if stale >= args.patience:
@@ -396,7 +412,11 @@ def main():
         tmp = state_path + '.tmp'
         torch.save({'cv': cv.state_dict(), 'opt': opt.state_dict(),
                     'sched': None if sched is None else sched.state_dict(),
-                    'epoch': epoch, 'best': best, 'stale': stale}, tmp)
+                    'epoch': epoch, 'best': best, 'stale': stale,
+                    'rng': {'torch': torch.get_rng_state(),
+                            'numpy': np.random.get_state(),
+                            'cuda': torch.cuda.get_rng_state_all()
+                                    if torch.cuda.is_available() else None}}, tmp)
         os.replace(tmp, state_path)
         if stale >= args.patience:
             say(f'early stopping at epoch {epoch}')
