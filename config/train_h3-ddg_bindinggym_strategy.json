@@ -1,0 +1,38 @@
+{
+  "_comment": "PRIMARY ARM. Isolates BindingGYM's inter-assay TRAINING STRATEGY while holding everything H3-DDG owns fixed. Model architecture AND model training parameters are H3-DDG's; only data loading (within-assay batches, uniform assay sampling) and the training strategy (listMLE, epoch selection on per-DMS Spearman) come from BindingGYM.",
+
+  "_comment_from_h3ddg": "Model training parameters, from H3-DDG Appendix A.4: Adam, lr 4e-4, no weight decay, no LR schedule, 20,000 total iterations. batch_size 2 is A.4's own upper value ('a batch size of 1, 2') and is simultaneously the smallest slate listMLE can rank -- so it satisfies both sides rather than being an arbitrary pick.",
+  "optimizer": "adam",
+  "scheduler": "none",
+  "lr": 0.0004,
+  "weight_decay": 0.0,
+  "batch_size": 2,
+
+  "_comment_from_bindinggym": "Training strategy, from BindingGYM training/{main.py,dataset.py,loss.py}: listMLE over a same-assay slate, assays drawn uniformly, 256 optimiser steps per epoch (their __len__ of batch_size*256), epoch chosen by validation per-DMS Spearman with patience 3. max_epochs 78 caps total steps at 256*78 = 19,968, i.e. H3-DDG's 20,000 budget rather than BindingGYM's 100 epochs.",
+  "steps_per_epoch": 256,
+  "max_epochs": 78,
+  "patience": 3,
+  "select_per_assay": 300,
+  "_comment_select": "Official early-stops on the FULL held-out fold every epoch, ~0.5h/epoch here. A fixed evenly-spaced 300-rows-per-assay subsample is used for selection instead; the selected weights are then scored once on the full fold.",
+
+  "_comment_model": "Model architecture, identical to config/train_h3-ddg.json and config/train_h3-ddg_bindinggym.json -- verified field by field.",
+  "seed": 42,
+  "eval_batch_size": 8,
+  "hidden_dim": 128,
+  "num_layers": 3,
+  "num_tri_heads": 4,
+  "num_edges": 48,
+  "ca_only": false,
+  "backbone_noise": 0.0,
+  "patch_size": 128,
+  "loss_weight_boltzmann": 1.0,
+  "use_hypergraph": true,
+  "hyper_ratio": 4,
+  "max_num_hyperedges": 420,
+  "num_mut_subgraph_nodes": 20,
+  "num_edges_ratio": 3.0,
+  "edges_selection": "dynamic",
+  "ex_type": "train",
+  "ex_name": "bindinggym_strategy_h3ddg_params",
+  "ckpt_path": "./data/v_48_020.pt"
+}

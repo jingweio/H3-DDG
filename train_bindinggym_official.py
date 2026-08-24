@@ -232,6 +232,11 @@ def main():
     ap.add_argument('--resume', action='store_true')
     ap.add_argument('--max_eval_batches', type=int, default=None,
                     help='cap the final evaluation (SMOKE TESTS ONLY)')
+    ap.add_argument('--probe_only', action='store_true',
+                    help='resolve the train/eval batch sizes on THIS GPU, print them, and exit. '
+                         'A 20-minute probe job is worth it before committing a 7h slot, since '
+                         "the memory ceiling depends on the GPU and on the fold's largest "
+                         'structure, and neither is knowable from the login node.')
     ap.add_argument('--batch_size', type=int, default=None,
                     help="override the config's batch size. BindingGYM uses 8, but their backbone "
                          "is plain ProteinMPNN; H3-DDG's 3-body triplet attention is O(K^2) in "
@@ -287,7 +292,6 @@ def main():
     model, _, _ = cv.get(0)
     model.to(device)
 
-    # BindingGYM's optimiser and schedule, not H3-DDG's.
     fit_bs = probe_batch_size(model, train_ds, pos, assay_names, args.batch_size,
                               MPNNPaddingCollate(), say)
     if fit_bs != args.batch_size:
@@ -301,6 +305,12 @@ def main():
 
     eval_bs = probe_eval_batch_size(model, val_ds, args.eval_batch_size,
                                     MPNNPaddingCollate(), say)
+    if cli.probe_only:
+        say(f'PROBE RESULT fold {cli.test_fold}: train batch_size {fit_bs} '
+            f'(wanted {param["batch_size"]}), eval_batch_size {eval_bs} '
+            f'(wanted {param["eval_batch_size"]})')
+        print('PROBE DONE')
+        return
     if eval_bs != args.eval_batch_size:
         say(f'!! eval_batch_size reduced {args.eval_batch_size} -> {eval_bs}. This affects speed '
             f'only: complex_row_indices() aligns predictions to metadata at any batch size.')
@@ -310,11 +320,26 @@ def main():
         full_loader = DataLoader(val_ds, batch_size=eval_bs, shuffle=False,
                                  collate_fn=MPNNPaddingCollate(), num_workers=cli.num_workers)
 
-    opt = torch.optim.AdamW(model.parameters(), lr=args.lr, betas=(0.9, 0.99),
-                            weight_decay=args.weight_decay, eps=1e-5)
-    sched = torch.optim.lr_scheduler.OneCycleLR(opt, max_lr=args.lr,
-                                                steps_per_epoch=args.steps_per_epoch,
-                                                epochs=args.max_epochs)
+    # The optimiser is a MODEL TRAINING PARAMETER, so which side owns it is a deliberate choice,
+    # not an implementation detail:
+    #   optimizer=adam  + scheduler=none     -> H3-DDG's own setting (Adam, lr 4e-4, wd 0). Use
+    #     this to isolate the training STRATEGY: only batching, loss and assay sampling differ
+    #     from the A.4 arm, so a difference cannot be attributed to the optimiser.
+    #   optimizer=adamw + scheduler=onecycle -> BindingGYM's full recipe (AdamW lr 1e-3, wd 0.05,
+    #     OneCycleLR), i.e. their published 0.4217 configuration end to end.
+    if getattr(args, 'optimizer', 'adamw').lower() == 'adam':
+        opt = torch.optim.Adam(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
+    else:
+        opt = torch.optim.AdamW(model.parameters(), lr=args.lr, betas=(0.9, 0.99),
+                                weight_decay=args.weight_decay, eps=1e-5)
+    sched = None if getattr(args, 'scheduler', 'onecycle').lower() == 'none' else \
+        torch.optim.lr_scheduler.OneCycleLR(opt, max_lr=args.lr,
+                                            steps_per_epoch=args.steps_per_epoch,
+                                            epochs=args.max_epochs)
+    say(f"optimizer {type(opt).__name__} lr {args.lr} weight_decay {args.weight_decay} "
+        f"scheduler {'none' if sched is None else 'OneCycleLR'} | batch_size {args.batch_size} "
+        f"| {args.steps_per_epoch} steps x <= {args.max_epochs} epochs "
+        f"= <= {args.steps_per_epoch * args.max_epochs} total steps")
 
     state_path = os.path.join(cli.save_dir, 'checkpoint', f'resume_fold{cli.test_fold}.pt')
     best_path = os.path.join(cli.save_dir, 'checkpoint', f'best_fold{cli.test_fold}.pt')
@@ -322,7 +347,9 @@ def main():
     if cli.resume and os.path.exists(state_path):
         blob = torch.load(state_path, map_location='cpu')
         cv.load_state_dict(blob['cv']); model, _, _ = cv.get(0); model.to(device)
-        opt.load_state_dict(blob['opt']); sched.load_state_dict(blob['sched'])
+        opt.load_state_dict(blob['opt'])
+        if sched is not None and blob.get('sched') is not None:
+            sched.load_state_dict(blob['sched'])
         start_epoch, best, stale = blob['epoch'] + 1, blob['best'], blob['stale']
         say(f'[resume] epoch {blob["epoch"]} done; best per-DMS Spearman {best:.4f}; '
             f'continuing at {start_epoch}/{args.max_epochs}')
@@ -340,7 +367,9 @@ def main():
             loss = listMLE(-out['ddG_pred'], -out['ddG_true'])
             loss.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), 100.0)
-            opt.step(); opt.zero_grad(); sched.step()
+            opt.step(); opt.zero_grad()
+            if sched is not None:
+                sched.step()
             tot += loss.item()
         df_sel = collect_results(model, sel_loader, desc=f'select e{epoch}')
         rho = per_dms_spearman(df_sel)
@@ -356,7 +385,8 @@ def main():
             stale += 1
             say(f'  no improvement ({stale}/{args.patience})')
         tmp = state_path + '.tmp'
-        torch.save({'cv': cv.state_dict(), 'opt': opt.state_dict(), 'sched': sched.state_dict(),
+        torch.save({'cv': cv.state_dict(), 'opt': opt.state_dict(),
+                    'sched': None if sched is None else sched.state_dict(),
                     'epoch': epoch, 'best': best, 'stale': stale}, tmp)
         os.replace(tmp, state_path)
         if stale >= args.patience:
