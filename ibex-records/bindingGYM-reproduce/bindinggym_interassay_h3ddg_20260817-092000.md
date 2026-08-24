@@ -452,6 +452,35 @@ BindingGYM 官方口径：ALL Spearman −0.1508 / AUC 0.4329 / MCC −0.0115 / 
 
 **④ 尚不能定论**：这是 5 个 fold 里最"偏"的两个（f1 全是 Z-domain 双侧突变；f2 的 ≥3 只有 hYAP65）。f0/f3/f4 覆盖 KRAS×6、GB1×2、4D5、SARS2-RBD、CD19 等主流 assay，占 376,446 行的绝大部分。**必须等 5 个 fold 齐了拼成完整 OOF、按 25 assay 等权平均**，才是可与 Table 2 直接比较的数字。
 
+## 5.9 f0/f3 的 walltime 下调（2026-08-24，临时排队操作）
+
+**问题**：f0/f3 按 §5.5 的 walltime 表申请了 18h/16h，从 2026-08-19 10:19 提交后**连续 PENDING 5 天 6 小时**，预估开始时间还在往后漂（08-25 16:02 → 08-26 09:06）。同期 8h 的 f1/f2 只排了约 20h、10h 的 f4 排了约 33h 就跑起来了。
+
+**根因**：§5.5 的 walltime 是按 `t ≈ a + b·K³` 外推的，**高估了约 3 倍**。三个已完成 fold 的实测 elapsed：
+
+| fold | 申请 | 实测 elapsed | 用掉比例 |
+|---|---|---|---|
+| f1 | 8h | 2:47:18 | 35% |
+| f2 | 8h | 2:31:51 | 32% |
+| f4 | 10h | 4:05:46 | 41% |
+
+模型每个 fold 都跑固定 20,000 iter，训练时间几乎相同，fold 之间的差异**只来自 eval**；而上表的离散度已经基本就是 eval 的离散度。K³ 外推把 eval 的结构尺寸依赖放得太大了。
+
+**处理**：用 `scontrol update jobid=<id> TimeLimit=07:00:00` **原地下调**，而不是 `scancel` + 重投 ——
+- 用户可以下调自己 pending job 的 TimeLimit（只有 admin 能上调），**不丢已积累的 5 天排队资历**；重投会把 submit time 重置，白等 5 天。
+- 下调后两个 job 的 `NODELIST(REASON)` 从 `(Priority)` 变成 `(None)`，预估开始时间提前到 08-26 05:50 / 07:44。
+
+7h 的依据：实测上限 4:05:46 + 71% buffer。**大概率一个 job 就能跑完**。
+
+**万一 7h 不够**：`train_bindinggym.py` 每 5,000 iter 存一次 resume point，用 `--resume` 续跑即可。为此专门加了一对**临时**脚本，与正常流程的 `sh/bindinggym_perfold_20260819.sh`（产出 f1/f2/f4 的那个）严格分开：
+
+- `sh/TEMP_bindinggym_chunked_20260824.sh` —— 7h、可续跑，开头会打印本 chunk 从第几个 iteration 接上；`srun` 正常退出才会打印 `FULLY DONE`，所以「日志里没有 FULLY DONE」就是需要发 chunk 2 的信号。
+- `sh/TEMP_submit_chunked.sh 0 3` —— 提交器。
+
+两者**只在 f0/f3 收尾期间存在，跑完即删**。训练本身没有任何改动：同一份 config、同一份固化的 fold split、同一条代码路径，变的只有 walltime 和「可能需要两个 job」这个预期。
+
+⚠️ **注意**：eval 阶段没有 checkpoint。如果 chunk 1 在训练完成后、eval 途中被砍，chunk 2 会 `start_it == max_iter` 直接跳过训练、重跑整个 eval —— 结果正确，只是浪费一次 eval。
+
 ## 6. Change log
 
 - **2026-08-17 09:20**：写下 plan；数据下载、inter-assay split 复现、突变映射验证完成。
@@ -468,3 +497,4 @@ BindingGYM 官方口径：ALL Spearman −0.1508 / AUC 0.4329 / MCC −0.0115 / 
 ## 7. Results
 
 _(待所有 job 完成后填写)_
+- **2026-08-24 12:5x**：f0/f3 walltime 18h/16h → **7h**（`scontrol update`，原地下调保住 5 天排队资历）；根因是 §5.5 的 K³ 外推高估约 3 倍，实测三个 fold 全部 ≤ 4:05:46。同时加入临时 chunked 脚本作为 7h 不够时的续跑兜底（§5.9）。
