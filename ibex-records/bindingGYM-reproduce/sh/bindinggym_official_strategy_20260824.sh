@@ -17,19 +17,35 @@
 # A run that lands near its fold's target confirms the strategy is the fix; one that lands near
 # zero says something else is wrong.
 #
+# Memory, measured on the 1016-residue 4D5_HER2 structure (the largest training structure for
+# folds 0 and 2): slate 1 peaks at 11.00 GiB, slate 2 needs ~22 GiB. A 40 GB a100 clears slate 2
+# with 1.8x margin; the 20 GB A4500 does not, which is why this cannot be validated locally.
+# The same figures make A.4's "batch size of 1, 2, depending on GPU memory and graph size"
+# concrete: on the authors' 24 GB RTX 4090, slate 2 is exactly where it stops fitting.
+#
 # Resumable: --resume continues from the last completed epoch.
 
 set -euo pipefail
 
 FOLD=$1
+# Which config: strategy (default) isolates BindingGYM's TRAINING STRATEGY while holding
+# H3-DDG's architecture AND training parameters fixed. full_recipe additionally swaps in
+# BindingGYM's optimiser (AdamW 1e-3, wd 0.05, OneCycleLR) -- their published 0.4217 setup, but
+# then a difference cannot be attributed to the strategy alone.
+ARM=${2:-strategy}
+case "$ARM" in
+  strategy)    CFG=./config/train_h3-ddg_bindinggym_strategy.json ;;
+  full_recipe) CFG=./config/train_h3-ddg_bindinggym_official.json ;;
+  *) echo "FATAL: unknown arm '$ARM' (want strategy|full_recipe)"; exit 1 ;;
+esac
 
 source /ibex/user/guoj0f/anaconda3/etc/profile.d/conda.sh
 conda activate h3ddg-reproduce
 cd /ibex/user/guoj0f/H3-DDG/reproduce
 
-SAVE_DIR=./results/bindinggym_official_fold${FOLD}
+SAVE_DIR=./results/bindinggym_${ARM}_fold${FOLD}
 
-echo "=== official strategy | fold ${FOLD} | job ${SLURM_JOB_ID} ==="
+echo "=== arm ${ARM} (${CFG}) | fold ${FOLD} | job ${SLURM_JOB_ID} ==="
 python - <<'PY'
 import torch, numpy, pandas, sklearn, Bio
 print('torch', torch.__version__, '| cuda', torch.version.cuda, '| gpu', torch.cuda.get_device_name(0))
@@ -44,10 +60,10 @@ done
 
 export WANDB_MODE=disabled
 srun python train_bindinggym_official.py \
-  --config_path ./config/train_h3-ddg_bindinggym_official.json \
+  --config_path ${CFG} \
   --test_fold "${FOLD}" \
   --save_dir "${SAVE_DIR}" \
   --resume \
   --num_workers 12
 
-echo "=== fold ${FOLD} official strategy DONE ==="
+echo "=== fold ${FOLD} arm ${ARM} DONE ==="

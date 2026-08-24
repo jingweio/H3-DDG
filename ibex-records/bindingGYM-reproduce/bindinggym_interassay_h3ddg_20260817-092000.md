@@ -806,6 +806,78 @@ H3-DDG 的预测由 ProteinMPNN 的负对数似然构成（论文式 16），而
 
 两个都跑，正好把「策略是否是解」与「该 fold 是否本身对抗」分开。
 
+## 5.15 归属划分修正：只换策略，不换优化器（2026-08-24）
+
+### 用户指正
+
+「**数据 loading 和模型训练策略**采用 BindingGYM 官方；**模型结构、模型训练参数**与 H3-DDG 拉齐。」
+
+§5.14 提交的 `50818834`/`50818835` 违反了后半条 —— 我把 BindingGYM 的优化器一起搬了过来。**已 `scancel`**（提交 20 min，未开始）。
+
+### 三个 config 的逐项审计
+
+**模型结构：三者完全一致 ✅**（逐字段比对，`diagnostics/` 无差异）
+`hidden_dim 128 / num_layers 3 / num_tri_heads 4 / num_edges 48 / use_hypergraph / hyper_ratio 4 / max_num_hyperedges 420 / num_mut_subgraph_nodes 20 / num_edges_ratio 3.0 / edges_selection dynamic / patch_size 128 / ca_only false / backbone_noise 0.0 / loss_weight_boltzmann 1.0 / seed 42 / v_48_020.pt`
+
+**模型训练参数：原提交全被换成 BindingGYM 的 ❌**
+
+| | H3-DDG | 被撤销的 official | **修正后 strategy** |
+|---|---|---|---|
+| optimizer | Adam | AdamW + OneCycleLR | **Adam** |
+| `lr` | 4e-4 | 1e-3 | **4e-4** |
+| `weight_decay` | 0.0 | 0.05 | **0.0** |
+| `batch_size` | A.4: "1, 2" | 8 | **2** |
+| 总步数 | 20,000 | 256×40 | **256×78 = 19,968** |
+
+**为什么这个混淆是致命的**：若 f0 跑出 0.55，无法区分是 within-assay batch + listMLE 起作用，还是换成 AdamW 1e-3 + OneCycleLR 起作用。
+
+### `batch_size = 2` 不是随手挑的
+
+A.4 原文是 "a batch size of **1, 2**"，而 **listMLE 至少需要 2**（单元素列表无排序）。2 是唯一同时满足两边的值，无需仲裁。
+
+### 显存实测，以及它对 A.4 的印证
+
+在 1016 残基的 `4D5_HER2`（fold 0 与 fold 2 的最大训练结构）上实测训练峰值：
+
+| slate | 前向行数 | 峰值 |
+|---|---|---|
+| 1 | 2 | **11.00 GiB** |
+| 2 | 4 | **OOM @ 18.46 GiB**（19.57 GiB 卡上），失败的单次分配 990 MB → 实需约 **22 GiB** |
+
+- 40 GB a100：22 GiB，**1.8× 余量，稳过**。20 GB 的 A4500 过不去，所以这一条无法本地验证。
+- 40 GB 上 slate 3 ≈ 33 GiB 已很紧 → **`batch_size 2` 既是 A.4 的声明值也接近硬件上限**。
+- 🔎 **反过来印证 A.4 那句话是真的**：作者用 24 GB 的 RTX 4090（A.4.2），slate 1 = 11 GiB 宽松、slate 2 ≈ 22 GiB 正好卡在上限 —— 完全对应 "batch size of 1, 2, depending on **GPU memory and graph size**"。我们的显存画像与他们一致。
+
+据此**不再发探测作业**（`--probe_only` 保留在脚本里备用）。
+
+### 数据 loading / 训练策略：哪些采用了官方，哪些不可能采用
+
+| 项 | 来源 | 说明 |
+|---|---|---|
+| batch 全部来自同一 assay | **官方** ✅ | 复现 `seed = index // batch_size` 的效果 |
+| assay 均匀采样（非按行数）| **官方** ✅ | |
+| 有放回抽样 | **官方** ✅ | 官方用 `np.random.randint` |
+| 256 步/epoch | **官方** ✅ | 其 `__len__ = batch_size*256` |
+| 每 epoch 重设种子 | **官方** ✅ | 其 `seed_bias = epoch` |
+| listMLE | **官方** ✅ | 逐字移植 `loss.py` |
+| patience 3 + 按 valid per-DMS Spearman 选 epoch | **官方** ✅ | |
+| **突变→结构的特征化** | **不可能采用** ⚠️ | 官方 `TaskDataset` 用 `parse_PDB` + `tied_featurize` 并把突变位点 mask 成 `'X'`，产出的是**单个序列**；H3-DDG 需要热力学循环的输入（complex + 各 isolated side）。必须用我们的 `bindinggym.py`。**这是硬约束，不是选择。** |
+| 每 epoch 的选择集 | **偏离**（成本）| 官方每 epoch 评测整个 held-out fold（此处约 0.5h/epoch）；我们用固定等距的 300 行/assay 子集选 epoch，选出的权重再在全量上评一次 |
+| 在**测试 fold** 上选 epoch | **照做 + 标注** | 官方 `fold_valid = split[fold][1]` 就是测试 fold，`main.py:579` 按其 Spearman 选。**官方发布的 0.4217 含 early-stopping oracle。** 照做以保持可比，但必须标注 |
+
+### 已提交
+
+| job | 评测 fold | held-out | 官方靶子 |
+|---|---|---|---|
+| `50820222` | **f0** | KRAS ×6（114,341 行）| **0.5542** |
+| `50820223` | **f2** | ACE2/CXCR4/PSD95×2/hYAP65（29,332 行）| 0.3035 |
+
+`full_recipe` 那一臂（连优化器一起换）保留为 `submit_official_strategy.sh full_recipe <fold>`，作为「官方全配方能到 0.4217」的上界参照，待 strategy 臂出结果后再决定是否需要。
+
+### 本地任务已全部终止
+
+用户要求不耽误主线，本地 A4500 上的 untrained baseline 预览（f1，已跑 1h01m）已 kill，GPU 释放。未训练 baseline 的正式数字改由 Ibex 的 `50817084`/`50817085`（仍 hold）提供。
+
 ## 6. Change log
 
 - **2026-08-17 09:20**：写下 plan；数据下载、inter-assay split 复现、突变映射验证完成。
@@ -828,3 +900,4 @@ _(待所有 job 完成后填写)_
 - **2026-08-24 14:3x**：新增 `--eval_only`，提交未训练 baseline `50817084`(f1, 2:30h) / `50817085`(f3, 5:00h)（§5.12），判读标准已先行写死。同时确认 fold 划分的验证边界：成员固化且 fingerprint 通过，但 `assay_chain_sides.tsv` 是自建、无外部交叉验证。
 - **2026-08-24 15:0x**：`assay_chain_sides.tsv` 验证通过（§5.13）—— 25/25 过四项检查；三个 Fab 案例的 side 内接触是跨 side 界面的 2.4–5.3 倍，证明「轻+重链合为一个 side」切在正确的缝上；4 个 Z-domain 的双侧突变确认。**数据侧至此无已知疑点**，问题收紧到训练配置。
 - **2026-08-24 15:2x**：根因定位到训练策略（§5.14）。label 方向三重验证无误；查出 4 个 gain-of-function assay（`5A12_VEGF` WT 在 0.02 分位、占 f4 的 86%），解释 f4 为负。官方 inter-assay 策略 = 同 assay batch + listMLE + assay 均匀采样，三个机制我全缺；`batch_size=1` 使 listMLE 恒为 0，故 A.4 口径结构上无法表达该策略。🔴 **官方发布的「朴素 ProteinMPNN + 其策略」ALL Spearman 0.4217，比 H3-DDG 论文的 0.2725 高 55%**，且 Table 2 的 ProteinMPNN 行是 zero-shot 版。已实现 `train_bindinggym_official.py` 并提交 `50818834`(f0)/`50818835`(f2)。
+- **2026-08-24 16:0x**：按用户指正修正归属划分（§5.15）。撤销 `50818834`/`50818835`（把 BindingGYM 优化器一起搬了，混淆了「策略」与「优化器」）。新 config `train_h3-ddg_bindinggym_strategy.json`：模型结构与训练参数全部 H3-DDG（Adam/4e-4/wd 0/19,968 步/batch 2），只有 data loading 与训练策略取自 BindingGYM。实测 slate 1 = 11.00 GiB、slate 2 ≈ 22 GiB，40 GB a100 有 1.8× 余量，且**反证 A.4 的 "batch size 1, 2" 在 24 GB RTX 4090 上正好卡这个界**。提交 `50820222`(f0) / `50820223`(f2)。本地预览已 kill。

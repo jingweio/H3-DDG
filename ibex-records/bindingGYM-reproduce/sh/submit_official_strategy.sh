@@ -1,5 +1,7 @@
 #!/bin/bash
-# Usage: ./submit_official_strategy.sh 0 2
+# Usage: ./submit_official_strategy.sh <arm> <fold> [fold ...]
+#   arm = strategy    -> H3-DDG architecture + H3-DDG training params + BindingGYM strategy
+#   arm = full_recipe -> also BindingGYM's optimiser (their published 0.4217 configuration)
 #
 # 7h for every fold. Training is fold-independent (256 steps/epoch, <=40 epochs, patience-3 early
 # stopping, which normally fires around epoch 10-20 => 1-2.5h). The fold-dependent part is the ONE
@@ -10,8 +12,9 @@
 WALL=07:00:00
 
 cd "$(dirname "$0")"
+ARM=$1; shift
 for F in "$@"; do
-  JID=$(sbatch --parsable --job-name="bgym_off_f${F}" --time="${WALL}" \
-        bindinggym_official_strategy_20260824.sh "${F}")
-  echo "fold ${F}: job ${JID}  (walltime ${WALL}, BindingGYM official strategy)"
+  JID=$(sbatch --parsable --job-name="bgym_${ARM:0:4}_f${F}" --time="${WALL}" \
+        bindinggym_official_strategy_20260824.sh "${F}" "${ARM}")
+  echo "fold ${F}: job ${JID}  (walltime ${WALL}, arm ${ARM})"
 done
