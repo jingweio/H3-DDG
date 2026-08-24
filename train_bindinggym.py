@@ -112,7 +112,16 @@ def main():
                              'is timestamped, so a requeued job would look in a brand-new directory.')
     parser.add_argument('--resume', action='store_true',
                         help='continue from the newest periodic checkpoint in --save_dir, if one exists.')
+    parser.add_argument('--eval_only', action='store_true',
+                        help='skip training entirely and evaluate the freshly initialised model: '
+                             'pretrained ProteinMPNN + untrained H3-DDG heads, i.e. the '
+                             'thermodynamic cycle with nothing fitted to BindingGYM. Diagnostic '
+                             'baseline. Outputs are suffixed _untrained so they can never '
+                             'overwrite a real run in the same --save_dir.')
     cli = parser.parse_args()
+    if cli.eval_only and cli.resume:
+        parser.error('--eval_only evaluates the untrained model; --resume would load weights into it')
+    sfx = '_untrained' if cli.eval_only else ''
 
     param = {k: v for k, v in json.loads(open(cli.config_path).read()).items()
              if not k.startswith('_comment')}
@@ -192,31 +201,35 @@ def main():
         m = f"[ckpt] saved resume point at iteration {its} -> {state_path}"
         print(m); log_file.write(m + '\n'); log_file.flush()
 
-    train_loader = mgr.get_train_loader()
-    t0 = time.time()
-    for its in range(start_it, args.max_iter):
-        batch = next(train_loader)
-        loss, _ = process_batch(model, batch, device, is_train=True, optimizer=optimizer)
+    if cli.eval_only:
+        print('[eval-only] no training: evaluating pretrained ProteinMPNN + untrained H3-DDG heads')
+        log_file.write('[eval-only] untrained baseline; no gradient step taken\n')
+    else:
+        train_loader = mgr.get_train_loader()
+        t0 = time.time()
+        for its in range(start_it, args.max_iter):
+            batch = next(train_loader)
+            loss, _ = process_batch(model, batch, device, is_train=True, optimizer=optimizer)
 
-        if its % 100 == 1:
-            rate = (its - start_it + 1) / max(time.time() - t0, 1e-6)
-            msg = (f"{time.strftime('%Y-%m-%d %H-%M-%S')} | [train] iter {its}/{args.max_iter} "
-                   f"| Loss {loss.item():.6f} | {rate:.2f} it/s")
-            print(msg)
-            log_file.write(msg + '\n')
-            log_file.flush()
+            if its % 100 == 1:
+                rate = (its - start_it + 1) / max(time.time() - t0, 1e-6)
+                msg = (f"{time.strftime('%Y-%m-%d %H-%M-%S')} | [train] iter {its}/{args.max_iter} "
+                       f"| Loss {loss.item():.6f} | {rate:.2f} it/s")
+                print(msg)
+                log_file.write(msg + '\n')
+                log_file.flush()
 
-        if its > 0 and its % ckpt_freq == 0:
-            save_resume_point(its)
+            if its > 0 and its % ckpt_freq == 0:
+                save_resume_point(its)
 
-        if its > 0 and its % args.val_freq == 1:
-            df, vloss = collect_results(model, mon_loader, device, desc=f'monitor@{its}')
-            log_file.write(f'[monitor] iter {its} val_loss {vloss:.6f}\n')
-            log_summary(f'monitor iter {its}', evaluate_oof(df), log_file)
+            if its > 0 and its % args.val_freq == 1:
+                df, vloss = collect_results(model, mon_loader, device, desc=f'monitor@{its}')
+                log_file.write(f'[monitor] iter {its} val_loss {vloss:.6f}\n')
+                log_summary(f'monitor iter {its}', evaluate_oof(df), log_file)
 
-    save_resume_point(args.max_iter - 1)   # training finished; also the resume no-op point
-    torch.save(cv_mgr.state_dict(),
-               os.path.join(ckpt_dir, f'h3ddg_bindinggym_fold{cli.test_fold}.ckpt'))
+        save_resume_point(args.max_iter - 1)   # training finished; also the resume no-op point
+        torch.save(cv_mgr.state_dict(),
+                   os.path.join(ckpt_dir, f'h3ddg_bindinggym_fold{cli.test_fold}.ckpt'))
 
     if cli.max_eval_batches is not None:
         print(f'!! WARNING: final eval capped at {cli.max_eval_batches} batches -- SMOKE TEST ONLY')
@@ -224,16 +237,16 @@ def main():
     df, vloss = collect_results(model, mgr.get_val_loader(), device, desc='final-eval',
                                max_batches=cli.max_eval_batches)
     df = df.sort_values(['DMS_id', 'row_index']).reset_index(drop=True)
-    df.to_csv(os.path.join(save_dir, f'oof_fold{cli.test_fold}.csv'), index=False)
+    df.to_csv(os.path.join(save_dir, f'oof_fold{cli.test_fold}{sfx}.csv'), index=False)
     for dms_id, sub in df.groupby('DMS_id'):
         sub.sort_values('row_index').to_csv(
-            os.path.join(save_dir, 'oof', f'{dms_id}_oof.csv'), index=False)
+            os.path.join(save_dir, 'oof', f'{dms_id}_oof{sfx}.csv'), index=False)
 
     res = evaluate_oof(df)
     for name, obj in res.items():
-        obj.to_csv(os.path.join(save_dir, f'{name}_fold{cli.test_fold}.csv'))
+        obj.to_csv(os.path.join(save_dir, f'{name}_fold{cli.test_fold}{sfx}.csv'))
     log_file.write(f'[final] val_loss {vloss:.6f} | rows {len(df)}\n')
-    log_summary(f'FINAL fold{cli.test_fold}', res, log_file)
+    log_summary(f'FINAL fold{cli.test_fold}{sfx}', res, log_file)
     print('DONE')
 
 
