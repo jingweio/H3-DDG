@@ -194,10 +194,12 @@ def monitor_subset(dataset, per_assay):
     return sorted(picked)
 
 
-def collect_results(model, dataloader, desc='eval'):
+def collect_results(model, dataloader, desc='eval', max_batches=None):
     rows = []
     model.eval()
-    for batch in tqdm(dataloader, desc=desc, dynamic_ncols=True):
+    for bi, batch in enumerate(tqdm(dataloader, desc=desc, dynamic_ncols=True)):
+        if max_batches is not None and bi >= max_batches:
+            break
         batch = recursive_to(batch, device)
         with torch.no_grad():
             _, out, _ = model(batch)
@@ -279,20 +281,41 @@ def main():
     # placeholder; rebuilt after the probe below, which needs the model on the device
     train_loader = DataLoader(train_ds, batch_sampler=sampler, collate_fn=MPNNPaddingCollate(),
                               num_workers=cli.num_workers)
-    # select_per_assay = 0 means "the whole held-out fold", which is what BindingGYM actually
-    # does (main.py evaluates fold_valid every epoch). A positive value subsamples it, which is
-    # cheaper but makes the patience rule noisier -- see the f1 run in the record's S5.18.
-    if int(args.select_per_assay) <= 0:
-        sel_idx = list(range(len(val_ds)))
-        say('selection set: the FULL held-out fold (BindingGYM\'s own protocol)')
+    # Two selection regimes.
+    #  early_stop=True  -> BindingGYM's own: score a selection set every epoch, keep the best
+    #                      weights, stop after `patience` epochs without improvement.
+    #                      select_per_assay 0 means the whole held-out fold, which is what
+    #                      main.py does; a positive value subsamples it (cheaper, but the f1 run
+    #                      in S5.18 showed patience 3 then fires on noise).
+    #  early_stop=False -> no stopping rule at all: train to max_epochs and evaluate the FULL
+    #                      held-out fold every `eval_every` epochs, keeping each of those
+    #                      checkpoints. Chosen because H3-DDG is far more expensive per
+    #                      evaluation than BindingGYM's plain ProteinMPNN, so scoring the fold
+    #                      every epoch costs ~1h x max_epochs here. Five evaluations at 1h beat
+    #                      fifty, and they show the whole trajectory rather than one selected point.
+    early_stop = bool(getattr(args, 'early_stop', True))
+    eval_every = int(getattr(args, 'eval_every', 0))
+    sel_loader = None
+    if early_stop:
+        if int(args.select_per_assay) <= 0:
+            sel_idx = list(range(len(val_ds)))
+            say('selection set: the FULL held-out fold (BindingGYM\'s own protocol)')
+        else:
+            sel_idx = monitor_subset(val_ds, args.select_per_assay)
+        sel_loader = DataLoader(Subset(val_ds, sel_idx), batch_size=args.eval_batch_size,
+                                shuffle=False, collate_fn=MPNNPaddingCollate(),
+                                num_workers=cli.num_workers)
+        say(f'selection subset: {len(sel_idx)} rows')
     else:
-        sel_idx = monitor_subset(val_ds, args.select_per_assay)
-    sel_loader = DataLoader(Subset(val_ds, sel_idx), batch_size=args.eval_batch_size,
-                            shuffle=False, collate_fn=MPNNPaddingCollate(),
-                            num_workers=cli.num_workers)
+        if eval_every <= 0:
+            raise SystemExit('early_stop=false needs eval_every > 0, else nothing is ever scored')
+        pts = [e for e in range(1, args.max_epochs + 1) if e % eval_every == 0]
+        if args.max_epochs not in pts:
+            pts.append(args.max_epochs)
+        say(f'no early stopping; full held-out fold ({len(val_ds)} rows) evaluated at epochs '
+            f'{pts} -> {len(pts)} checkpoints')
     full_loader = DataLoader(val_ds, batch_size=args.eval_batch_size, shuffle=False,
                              collate_fn=MPNNPaddingCollate(), num_workers=cli.num_workers)
-    say(f'selection subset: {len(sel_idx)} rows')
 
     cv = CrossValidation(config=args, num_cvfolds=1, model_factory=DDGPredictor).to('cpu')
     cv.load_mpnn_state_dict(torch.load(args.ckpt_path, map_location='cpu'))
@@ -403,19 +426,44 @@ def main():
             if sched is not None:
                 sched.step()
             tot += loss.item()
-        df_sel = collect_results(model, sel_loader, desc=f'select e{epoch}')
-        rho = per_dms_spearman(df_sel)
-        say(f"{time.strftime('%Y-%m-%d %H-%M-%S')} | epoch {epoch}/{args.max_epochs} | "
+        ep1 = epoch + 1                       # 1-based, so "every 10 epochs" reads naturally
+        if early_stop:
+            df_sel = collect_results(model, sel_loader, desc=f'select e{epoch}')
+            rho = per_dms_spearman(df_sel)
+        else:
+            rho = float('nan')
+        say(f"{time.strftime('%Y-%m-%d %H-%M-%S')} | epoch {ep1}/{args.max_epochs} | "
             f"listMLE {tot / max(step + 1, 1):.6f} | lr {opt.param_groups[0]['lr']:.2e} | "
             f"per-DMS Spearman(sel) {rho:.4f} | best {best:.4f} | {time.time() - t0:.0f}s")
 
-        if rho > best:
-            best, stale = rho, 0
-            torch.save(cv.state_dict(), best_path)
-            say(f'  new best -> {best_path}')
-        else:
-            stale += 1
-            say(f'  no improvement ({stale}/{args.patience})')
+        if early_stop:
+            if rho > best:
+                best, stale = rho, 0
+                torch.save(cv.state_dict(), best_path)
+                say(f'  new best -> {best_path}')
+            else:
+                stale += 1
+                say(f'  no improvement ({stale}/{args.patience})')
+        elif ep1 % eval_every == 0 or ep1 == args.max_epochs:
+            # Scheduled checkpoint: keep the weights AND score the whole held-out fold now.
+            # Written per epoch so a resumed run never redoes an evaluation it already has, and
+            # so the final table can be rebuilt from disk rather than from in-memory state.
+            ck = os.path.join(cli.save_dir, 'checkpoint', f'ckpt_ep{ep1}_fold{cli.test_fold}.pt')
+            torch.save(cv.state_dict(), ck)
+            df_e = collect_results(model, full_loader, desc=f'eval ep{ep1}',
+                                   max_batches=cli.max_eval_batches)
+            df_e = df_e.sort_values(['DMS_id', 'row_index']).reset_index(drop=True)
+            df_e.to_csv(os.path.join(cli.save_dir,
+                                    f'oof_fold{cli.test_fold}_ep{ep1}.csv'), index=False)
+            res_e = evaluate_oof(df_e)
+            for name, obj in res_e.items():
+                obj.to_csv(os.path.join(cli.save_dir,
+                                        f'{name}_fold{cli.test_fold}_ep{ep1}.csv'))
+            say(f'CHECKPOINT EVAL epoch {ep1} | rows {len(df_e)} | ckpt {ck}')
+            for name in ('h3ddg_summary', 'bindinggym_summary'):
+                say(f'--- ep{ep1} {name} ---\n'
+                    + res_e[name].to_string(float_format=lambda v: f'{v:.4f}'))
+            model.train()
         tmp = state_path + '.tmp'
         torch.save({'cv': cv.state_dict(), 'opt': opt.state_dict(),
                     'sched': None if sched is None else sched.state_dict(),
@@ -425,9 +473,31 @@ def main():
                             'cuda': torch.cuda.get_rng_state_all()
                                     if torch.cuda.is_available() else None}}, tmp)
         os.replace(tmp, state_path)
-        if stale >= args.patience:
+        if early_stop and stale >= args.patience:
             say(f'early stopping at epoch {epoch}')
             break
+
+    if not early_stop:
+        # Every scheduled epoch was already scored above; assemble the trajectory from disk so
+        # the table is complete even if the run spanned several jobs.
+        say('=' * 72)
+        say(f'TRAJECTORY fold{cli.test_fold} | no early stopping | '
+            f'{args.max_epochs} epochs, evaluated every {eval_every}')
+        rows = []
+        for ep1 in range(eval_every, args.max_epochs + 1, eval_every):
+            f = os.path.join(cli.save_dir, f'h3ddg_summary_fold{cli.test_fold}_ep{ep1}.csv')
+            if not os.path.exists(f):
+                say(f'  epoch {ep1}: not evaluated yet'); continue
+            d = pd.read_csv(f, index_col=0)
+            for sl in d.index:
+                rows.append(dict(epoch=ep1, slice=sl, **{k: d.loc[sl, k] for k in
+                                 ('pearson', 'spearman', 'auroc', 'rmse_raw', 'n_assays', 'n_rows')}))
+        if rows:
+            t = pd.DataFrame(rows)
+            say(t.to_string(index=False, float_format=lambda v: f'{v:.4f}'))
+            t.to_csv(os.path.join(cli.save_dir, f'trajectory_fold{cli.test_fold}.csv'), index=False)
+        print('DONE')
+        return
 
     say('loading best weights for the full held-out evaluation')
     cv.load_state_dict(torch.load(best_path, map_location='cpu'))
