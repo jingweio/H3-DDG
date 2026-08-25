@@ -1088,6 +1088,53 @@ BindingGYM 官方口径：ALL Spearman 0.2311 / AUC 0.6249 / MCC 0.0263 / NDCG 0
 
 **④ 「每 epoch 评全量」对我们比对官方贵得多。** f1 上每 epoch：训练 256 步 × batch 2 = 512 次 item 前向+反向；全量评测 55,081 行 × 2 次前向（complex + isolated side）= **110,162 次前向**，比例约 **1 : 215**。官方是纯 ProteinMPNN，每行 1 次前向且无 triplet attention，他们这个比例小一个量级以上。**所以「照抄官方的每-epoch 全量评测」在我们的模型上不是等价操作，而是把算力结构整体倒置。** §5.18 里 patience 3 误杀的根源就在这个取舍上。
 
+## 5.20 bgymfull 臂：全面采用 BindingGYM 官方配置（2026-08-25）
+
+### 用户的判断与新的归属划分
+
+「H3-DDG 论文里描述的 experimental-config 应该都属于是在 SKEMPIv2 上的实验」—— 据此，在 BindingGYM 上复现应**全面采用 BindingGYM 官方配置**，只保留 H3-DDG 的 (1) 热力学循环、(2) `backbone_noise = 0.0`。
+
+这个判断有独立证据支持（§5.19）：A.4 的 `lr 4e-4 / 20,000 iter` 连作者自己发布的 SKEMPI config（`4e-05 / 38000`）都描述不了，而我们复现出 Table 1 用的是后者。A.4 作为「BindingGYM 实验的规格」本就无从保证。
+
+| 项 | 来源 | 值 |
+|---|---|---|
+| optimizer | **BindingGYM** | AdamW, lr **1e-3**, betas (0.9,0.99), wd **0.05**, eps 1e-5 |
+| scheduler | **BindingGYM** | **OneCycleLR**(max_lr=1e-3, 256 步/epoch, epochs=100) |
+| loss | **BindingGYM** | **listMLE** |
+| batch 组成 | **BindingGYM** | 同一 assay |
+| assay 采样 | **BindingGYM** | 均匀（非按行数）|
+| epoch 结构 | **BindingGYM** | 256 步/epoch × **100 epoch** |
+| 早停 | **BindingGYM** | **patience 3** on per-DMS Spearman |
+| **早停/选择集** | **BindingGYM** | **整个 held-out fold**（`select_per_assay: 0`，新增支持）|
+| batch_size | **BindingGYM** | **8**（探测会下调，见下）|
+| **readout** | **H3-DDG（保留）** | 热力学循环（式 16），非官方的「mask + Σlogit 差」|
+| **骨架噪声** | **H3-DDG（保留）** | **0.0**，非官方的 `augment_eps 0.2` |
+| 架构 | H3-DDG | 与 `config/train_h3-ddg.json` **逐字段一致**（已校验，0 差异）|
+
+### 两处必须记录的现实约束
+
+**① `batch_size 8` 几乎肯定装不下。** 实测（§5.15）1016 残基结构上 slate 1 峰值 11.00 GiB → slate 8 需约 88 GiB。启动时的探测会按 8→4→2 下调并把实际值打进日志，所以**运行记录里会有它真正用了多少**，不会静默偏离。
+
+**② full-fold 选择集的算力结构与官方不同。** f1 上每 epoch：训练 256 步 ≈ 3 min，全量选择集 55,081 行 ≈ **1.0h**（§5.19 ④ 的 1:215）。所以 **7h walltime 约覆盖 6 个 epoch**，靠 `--resume` 跨多轮续跑（resume 保真度已验证等同从头重跑，§5.17 的 RNG 修复）。这是「照抄官方」在我们模型上的真实代价，不是我又做了取舍 —— 官方的 ProteinMPNN 每行 1 次前向且无 triplet attention，他们这一步很便宜。
+
+另注：`OneCycleLR(epochs=100)` 配 patience 3 意味着若在第 15 个 epoch 早停，学习率只走完 15% 的周期、仍在爬升段。**这正是官方的行为**（他们的 config 完全一样），照做。
+
+### 已提交
+
+**`50844967`**，arm = `bgymfull`，评测 fold = **f1**，7h walltime。
+
+三条 smoke 验证通过（本地，缩小超边数以适配 20GB）：`selection set: the FULL held-out fold`、`optimizer AdamW lr 0.001 weight_decay 0.05 scheduler OneCycleLR`、选择集规模 = 该 fold 全量。
+
+### 三个臂的对照关系
+
+| 臂 | optimizer | loss | batch 组成 | 选择集 | f1 ALL Spearman |
+|---|---|---|---|---|---|
+| A.4（`bindinggym_perfold`）| Adam 4e-4 wd 0 | 裸 MSE | 全 assay 混采, bs 1 | 无选择 | **0.0904** |
+| strategy | Adam 4e-4 wd 0（H3-DDG）| listMLE | 同 assay, bs 2 | 300 行/assay | **0.2311** |
+| **bgymfull**（本次）| **AdamW 1e-3 wd 0.05 + OneCycle** | listMLE | 同 assay, bs≤8 | **全量 fold** | 待测 |
+
+参照：论文 Table 2 = 0.2725；官方 ProteinMPNN 微调的 f1 分项（本记录重构）= 0.2719。
+
 ## 6. Change log
 
 - **2026-08-17 09:20**：写下 plan；数据下载、inter-assay split 复现、突变映射验证完成。
@@ -1115,3 +1162,4 @@ _(待所有 job 完成后填写)_
 - **2026-08-24 17:1x**：**更正两处**（§5.17）：(a) 「官方 0.4217 比论文 0.2725 高 55%」作废 —— H3-DDG Table 2 是单 fold，BindingGYM Table 5 是五 fold 合并覆盖全部数据，两者不可直接比；(b) 指向 f1 的证据只有一条独立（≥3 突变数双第一），另两条同出于同一重构。核实 BindingGYM 论文 Table 5 原文为 ProteinMPNN ALL 0.42、ProteinMPNN-R 0.16，与仓库 csv 逐位吻合。用户决定收敛主线：取消全部在排任务，**只提交 `50829137`（strategy 臂，f1，7h）**。
 - **2026-08-25 10:5x**：🎯 **f1 strategy 臂完成**（`50829137`，1:37:47，A100-80GB）。**只换 data loading 与损失，Spearman 从 A.4 臂的 0.0904 升到 0.2311（2.56×），达论文 0.2725 的 85%；AUROC 0.6283 反超论文 0.5703。塌缩消失，§5.10 的诊断确证 —— 根因是训练配方。** 但选择集指标 epoch 间摆动 ±0.2，patience 3 在 epoch 6 误杀，只用掉 19,968 步预算的 9%，最优权重来自 epoch 3；根源是我为省算力把每-epoch 选择集从官方的全量 fold 缩到 300 行/assay（§5.18）。
 - **2026-08-25 11:2x**：四出处逐项溯源训练策略（§5.19）。**关键：两个数据集都没有 validation split，早停与模型选择用的都是测试 fold 本身**（H3-DDG 是事后 `validate_all.py` 扫 checkpoint、BindingGYM 是训练中 `best_model` + patience 3）；H3-DDG **完全没有早停**。BindingGYM 的「100 epochs」= 256 batch/epoch，batch 8 时仅 0.64 个真实 pass；其 25,600 步与 H3-DDG 的 20,000 步只差 28%，两预算相容。但我们每 epoch 的训练:评测算力比是 1:215（官方低一个量级以上），故「照抄每-epoch 全量评测」在我们模型上不等价。
+- **2026-08-25 12:1x**：新增 **bgymfull 臂**（§5.20）—— 按用户判断（A.4 描述的是 SKEMPI 实验，不该作为 BindingGYM 的规格）全面采用 BindingGYM 官方配置：AdamW 1e-3/wd 0.05/OneCycleLR、listMLE、100 epoch、patience 3、**全量 held-out fold 做选择集**（新增 `select_per_assay: 0` 支持）、batch_size 8（探测会下调）；只保留 H3-DDG 的热力学循环与 `backbone_noise 0.0`。提交 `50844967`（f1，7h）。full-fold 选择集使每 epoch 约 1.0h，7h 约覆盖 6 epoch，靠 `--resume` 跨轮续跑。
