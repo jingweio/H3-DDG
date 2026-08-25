@@ -279,7 +279,14 @@ def main():
     # placeholder; rebuilt after the probe below, which needs the model on the device
     train_loader = DataLoader(train_ds, batch_sampler=sampler, collate_fn=MPNNPaddingCollate(),
                               num_workers=cli.num_workers)
-    sel_idx = monitor_subset(val_ds, args.select_per_assay)
+    # select_per_assay = 0 means "the whole held-out fold", which is what BindingGYM actually
+    # does (main.py evaluates fold_valid every epoch). A positive value subsamples it, which is
+    # cheaper but makes the patience rule noisier -- see the f1 run in the record's S5.18.
+    if int(args.select_per_assay) <= 0:
+        sel_idx = list(range(len(val_ds)))
+        say('selection set: the FULL held-out fold (BindingGYM\'s own protocol)')
+    else:
+        sel_idx = monitor_subset(val_ds, args.select_per_assay)
     sel_loader = DataLoader(Subset(val_ds, sel_idx), batch_size=args.eval_batch_size,
                             shuffle=False, collate_fn=MPNNPaddingCollate(),
                             num_workers=cli.num_workers)

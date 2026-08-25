@@ -36,7 +36,8 @@ ARM=${2:-strategy}
 case "$ARM" in
   strategy)    CFG=./config/train_h3-ddg_bindinggym_strategy.json ;;
   full_recipe) CFG=./config/train_h3-ddg_bindinggym_official.json ;;
-  *) echo "FATAL: unknown arm '$ARM' (want strategy|full_recipe)"; exit 1 ;;
+  bgymfull)    CFG=./config/train_h3-ddg_bindinggym_bgymfull.json ;;
+  *) echo "FATAL: unknown arm '$ARM' (want strategy|full_recipe|bgymfull)"; exit 1 ;;
 esac
 
 source /ibex/user/guoj0f/anaconda3/etc/profile.d/conda.sh
