@@ -1119,9 +1119,37 @@ BindingGYM 官方口径：ALL Spearman 0.2311 / AUC 0.6249 / MCC 0.0263 / NDCG 0
 
 另注：`OneCycleLR(epochs=100)` 配 patience 3 意味着若在第 15 个 epoch 早停，学习率只走完 15% 的周期、仍在爬升段。**这正是官方的行为**（他们的 config 完全一样），照做。
 
+### 用户修订：去掉早停，固定 50 epoch，每 10 epoch 评一次全量
+
+「考虑到 H3-DDG 过于 time-consuming，我们就先不要 early-stop 了，设定最多跑 50 个 epoch，然后每隔 10 个 epochs 在 f1 上 testing 一下，最后汇报 5 个不同模型 checkpoints 的结果。」
+
+**这个改法反而大幅省算力**：官方的「每 epoch 评全量」在 f1 上是 50 × 1.0h = **50h**；改成 5 次全量评测只要 **5.0h**。
+
+| | 官方 patience 3 | 本臂修订后 |
+|---|---|---|
+| 停止规则 | 3 个 epoch 无改进即停 | **无**，固定 50 epoch |
+| 全量评测次数 | 最多 100 次（每 epoch）| **5 次**（epoch 10/20/30/40/50）|
+| 产出 | 1 个「最优」权重 | **5 个 checkpoint + 整条轨迹** |
+| f1 上评测总耗时 | ~50h（若跑满 50 epoch）| **~5.0h** |
+
+实现为 `early_stop: false` + `eval_every: 10`。`early_stop=false` 时**完全不构建 selection loader**（epoch 之间不做任何评测），只在调度点评全量。每个调度点各写自己的 `oof_fold1_ep{N}.csv` 与两套指标 csv，**所以跨作业 resume 不会重做已完成的评测**，收尾的轨迹表从磁盘重建而非依赖内存状态 —— 这是必须的，因为 50 epoch + 5 次评测装不进一个 7h 作业。
+
+**这是对 BindingGYM 的 patience 3 的一处刻意偏离，其余字段仍全部是官方的**，两个 H3-DDG 例外（热力学循环、`backbone_noise 0.0`）不变。
+
+### 预算与轮次
+
+| 探测到的 batch | 训练 50 epoch | 5 次全量评测 | 合计 |
+|---|---|---|---|
+| 2 | 2.6h | 5.0h | **~7.6h** |
+| 4 | 5.2h | 5.0h | **~10.2h** |
+
+7h walltime **需要 2 轮**（`--resume` 续跑，保真度已验证等同从头重跑）。第一轮预计跑到 epoch 30–35（拿到 3 个评测点），第二轮收尾。
+
 ### 已提交
 
-**`50844967`**，arm = `bgymfull`，评测 fold = **f1**，7h walltime。
+**`50844967`**，arm = `bgymfull`，评测 fold = **f1**，7h walltime。config 在作业启动时读取，所以修订后的代码与配置已同步到 Ibex，该作业**无需重投即会按新设定运行**（队列位置保留）。
+
+本地 smoke 全通过：`no early stopping; full held-out fold (29332 rows) evaluated at epochs [2, 4] -> 2 checkpoints`、逐调度点的 `CHECKPOINT EVAL` + ckpt 落盘、收尾的 `TRAJECTORY` 表。
 
 三条 smoke 验证通过（本地，缩小超边数以适配 20GB）：`selection set: the FULL held-out fold`、`optimizer AdamW lr 0.001 weight_decay 0.05 scheduler OneCycleLR`、选择集规模 = 该 fold 全量。
 
