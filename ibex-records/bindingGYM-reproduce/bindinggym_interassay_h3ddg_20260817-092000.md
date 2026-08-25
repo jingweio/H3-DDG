@@ -1048,6 +1048,46 @@ BindingGYM 官方口径：ALL Spearman 0.2311 / AUC 0.6249 / MCC 0.0263 / NDCG 0
 
 ⚠️ 三个选项都只调「早停/选择」这一处偏离，**不涉及 per-assay 标准化或改 listMLE**。
 
+## 5.19 两篇论文 + 两份代码的训练策略逐项溯源（2026-08-25）
+
+四个独立出处逐项核对。**H 论**=H3-DDG 论文；**H 码**=H3-DDG 发布代码（仅 SKEMPI）；**B 论**=BindingGYM 论文；**B 码**=BindingGYM `training/`。
+
+| 项 | H3-DDG 论文 | H3-DDG 发布代码 | BindingGYM 论文 | BindingGYM 代码 | 我们当前 |
+|---|---|---|---|---|---|
+| 训练量 | **20,000 iterations**（A.4.1）| `max_iter 38000`（SKEMPI config；commit `d03eda5` 从 50000 改下来）| **100 epochs**（A.3.2）| `epochs = 100`（main.py:234）| 78 epoch × 256 = **19,968 步** |
+| 一个 epoch 多大 | 未提（全文只按 iteration 计）| 无 epoch 概念 | **未定义** | `__len__ = min(batch_size*256, n)` → **256 个 batch** | 256 步/epoch |
+| **早停** | **完全未提** | **无早停**，跑满 `max_iter` | **有，patience 3**（A.3.2）| `patience = 3`（main.py:236）；`if not_improve_epochs >= patience: break` | patience 3 |
+| 早停/选择的指标 | 未提 | `validate_all.py`：按各 fold 的 **Spearman** 排序取最优 | 未提 | `valid_metrics['spearman']`（main.py:579，`obj_max=1`）| per-DMS Spearman |
+| **早停/选择用哪个 split** | 未提 | **held-out fold 本身**（`online_validate(fold)` 用 `get_val_loader(fold)`）| 未提 | **`fold_valid = split[fold][1]` = 测试 fold** | 测试 fold 的**子集** |
+| **是否存在独立 validation split** | **没有** | **没有**（3-fold CV，held-out 即 val 即 test）| **没有** —— A.2 原文「Data from one group are used **exclusively for testing**, while data from the remaining four groups are used for training」（两分） | **没有**，`split[fold]` 只有 (train, valid)；`test = None` 在 inter 模式 | 没有 |
+| 模型选择时机 | 未提 | **事后**：跑完后 `validate_all.py` 扫全部 checkpoint | 未提 | **训练中**：`best_model = deepcopy(...)` 每次 Spearman 改进时 | 训练中 |
+| optimizer | Adam, lr 4e-4（A.4.1）| **Adam, lr 4e-05**（config）| **AdamW, lr 1e-3, wd 0.05, eps 1e-5**（A.3.2）| 同（main.py:402）+ OneCycleLR | **Adam 4e-4, wd 0**（H3-DDG 侧）|
+| loss | **MSE**（式 17）| MSE（`ddg_predictor.py:72`）| **ListMLE**（A.3.2）| `loss_tr = listMLE` | **listMLE**（B 侧）|
+| batch 组成 | 未提 | 全数据 shuffle | 「every batch drawn ...」（§4 句子跨页被截断）| **同一 assay**（`seed = index // batch_size`）| 同一 assay |
+| batch size | **"1, 2, depending on GPU memory and graph size"** | 1 | 未给数值 | 48（argparse）→ **8**（run.sh 覆盖）| **2** |
+| 突变位点处理 | 热力学循环（式 16）| 同 | **全部 mask 成 X**，预测 = Σmt_logit − Σwt_logit（A.3.2）| `mseq[pos-1]='X'` | 热力学循环（H3-DDG 侧）|
+| 骨架噪声 | `backbone_noise` 未提 | `0.0`（config）| 未提 | **`augment_eps=0.2`** | 0.0（H3-DDG 侧）|
+| 检验频率 | 未提 | 每 `val_freq=500` iter | 每 epoch | 每 epoch | 每 epoch |
+| 硬件 | RTX 4090（A.4.2）| — | 一张 A100（A.3.3）| — | A100-80GB |
+
+### 由此得出的四条对复现有直接影响的结论
+
+**① 两个数据集都没有 validation split。** 两篇论文都是二分（train / test），两份代码也都是。**早停与模型选择用的都是测试 fold 本身** —— 这是两边共有的设计，不是 BindingGYM 独有的问题。所以我们照做是对的，但两边发布的数值都含 early-stopping / checkpoint-selection oracle，必须标注。
+
+**② 「100 epochs」远没有听起来那么多。** BindingGYM 的一个 epoch 是 `min(batch_size*256, n)` 条样本 = **256 个 batch**，不是一遍数据。batch 8 时 = 2,048 样本，占 f1 训练集 321,365 行的 **0.64%** —— **100 epoch 也只有 0.64 个真实 pass。**
+
+**③ 两个训练预算其实是相容的：**
+
+| | optimizer 步数 | 样本数 |
+|---|---|---|
+| BindingGYM 100 epoch | 25,600 | 204,800（batch 8）|
+| H3-DDG A.4 20,000 iter | 20,000 | 40,000（batch 2）|
+| 我们 78 epoch | 19,968 | 39,936 |
+
+步数上二者只差 28%，所以「用 H3-DDG 的 20,000 步预算 + BindingGYM 的 epoch 结构」不是折衷，而是两边本来就接近。**但样本数上我们只有官方的 1/5**（batch 2 vs 8，而 batch 8 因 O(K²) 的 triplet attention 装不下，见 §5.15）。
+
+**④ 「每 epoch 评全量」对我们比对官方贵得多。** f1 上每 epoch：训练 256 步 × batch 2 = 512 次 item 前向+反向；全量评测 55,081 行 × 2 次前向（complex + isolated side）= **110,162 次前向**，比例约 **1 : 215**。官方是纯 ProteinMPNN，每行 1 次前向且无 triplet attention，他们这个比例小一个量级以上。**所以「照抄官方的每-epoch 全量评测」在我们的模型上不是等价操作，而是把算力结构整体倒置。** §5.18 里 patience 3 误杀的根源就在这个取舍上。
+
 ## 6. Change log
 
 - **2026-08-17 09:20**：写下 plan；数据下载、inter-assay split 复现、突变映射验证完成。
@@ -1074,3 +1114,4 @@ _(待所有 job 完成后填写)_
 - **2026-08-24 16:3x**：三问核实（§5.16）。(a) 6 个作业全部 inter-assay，共用固化的 fold tsv + assay 级泄漏断言，从未提交 intra-assay。(b) 「官方靶子 0.4217」= **pretrained ProteinMPNN（同一份 v_48_020）+ 官方 listMLE 策略微调**；`-R` 后缀是随机初始化（0.1585），故预训练权重单独贡献 0.263。(c) **实测**在 BindingGYM 官方 pin（numpy 1.24.4 / sklearn 1.3.2）下重算 fold，fingerprint 与 committed tsv `diff` 0 行 —— 划分同时与两篇论文拉齐，**不存在二选一**；只有 numpy ≥2 才偏离且已被 guard 拦住。
 - **2026-08-24 17:1x**：**更正两处**（§5.17）：(a) 「官方 0.4217 比论文 0.2725 高 55%」作废 —— H3-DDG Table 2 是单 fold，BindingGYM Table 5 是五 fold 合并覆盖全部数据，两者不可直接比；(b) 指向 f1 的证据只有一条独立（≥3 突变数双第一），另两条同出于同一重构。核实 BindingGYM 论文 Table 5 原文为 ProteinMPNN ALL 0.42、ProteinMPNN-R 0.16，与仓库 csv 逐位吻合。用户决定收敛主线：取消全部在排任务，**只提交 `50829137`（strategy 臂，f1，7h）**。
 - **2026-08-25 10:5x**：🎯 **f1 strategy 臂完成**（`50829137`，1:37:47，A100-80GB）。**只换 data loading 与损失，Spearman 从 A.4 臂的 0.0904 升到 0.2311（2.56×），达论文 0.2725 的 85%；AUROC 0.6283 反超论文 0.5703。塌缩消失，§5.10 的诊断确证 —— 根因是训练配方。** 但选择集指标 epoch 间摆动 ±0.2，patience 3 在 epoch 6 误杀，只用掉 19,968 步预算的 9%，最优权重来自 epoch 3；根源是我为省算力把每-epoch 选择集从官方的全量 fold 缩到 300 行/assay（§5.18）。
+- **2026-08-25 11:2x**：四出处逐项溯源训练策略（§5.19）。**关键：两个数据集都没有 validation split，早停与模型选择用的都是测试 fold 本身**（H3-DDG 是事后 `validate_all.py` 扫 checkpoint、BindingGYM 是训练中 `best_model` + patience 3）；H3-DDG **完全没有早停**。BindingGYM 的「100 epochs」= 256 batch/epoch，batch 8 时仅 0.64 个真实 pass；其 25,600 步与 H3-DDG 的 20,000 步只差 28%，两预算相容。但我们每 epoch 的训练:评测算力比是 1:215（官方低一个量级以上），故「照抄每-epoch 全量评测」在我们模型上不等价。
