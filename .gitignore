@@ -9,3 +9,4 @@ results/
 # ibex job logs
 ibex-records/**/*.out
 ibex-records/**/*.err
+bgym_official/input/
