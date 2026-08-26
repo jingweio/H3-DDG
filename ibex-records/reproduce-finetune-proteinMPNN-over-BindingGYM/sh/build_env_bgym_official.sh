@@ -15,8 +15,16 @@ set -euo pipefail
 ENV=bgym-official
 source /ibex/user/guoj0f/anaconda3/etc/profile.d/conda.sh
 
+# --force removes a previous attempt of THIS project's env only. Guarded so it can never touch
+# another experiment's env, which is the failure ibex-usage §1d records.
 if conda env list | grep -qE "^${ENV}\s"; then
-  echo "FATAL: env ${ENV} already exists. Refusing to rebuild -- inspect it instead."; exit 1
+  if [ "${1:-}" = "--force" ]; then
+    echo "removing the existing ${ENV} (this project's env only)"
+    conda env remove -y -n "$ENV"
+  else
+    echo "FATAL: env ${ENV} already exists. Pass --force to rebuild, or inspect it instead."
+    exit 1
+  fi
 fi
 
 conda create -y -n "$ENV" python=3.8
@@ -24,7 +32,12 @@ conda activate "$ENV"
 python -V
 
 pip install -q torch==1.13.1+cu117 --extra-index-url https://download.pytorch.org/whl/cu117
-pip install -q torch-scatter==2.1.0+pt113cu117 \
+# All FOUR of upstream's companion wheels, not just torch-scatter. PyG 2.2.0's data/data.py
+# imports torch_sparse unconditionally at module level (it only became optional in 2.3+), so
+# trimming the list to what the code *appears* to use breaks the import. Take install.sh's line
+# verbatim -- these are prebuilt wheels keyed to torch 1.13.1+cu117, nothing is compiled.
+pip install -q torch-scatter==2.1.0+pt113cu117 torch-sparse==0.6.16+pt113cu117 \
+    torch-cluster==1.6.0+pt113cu117 torch-spline-conv==1.2.1+pt113cu117 \
     -f https://data.pyg.org/whl/torch-1.13.1+cu117.html
 pip install -q torch-geometric==2.2.0
 pip install -q fair-esm peft==0.12.0
@@ -34,9 +47,10 @@ pip install -q "numpy==1.24.4" "scikit-learn==1.3.2" "pandas==2.0.3" "scipy==1.1
 
 echo "=== verification ==="
 python - <<'PY'
-import torch, torch_scatter, torch_geometric, numpy, sklearn, pandas, scipy, Bio, esm, peft
+import torch, torch_scatter, torch_sparse, torch_geometric, numpy, sklearn, pandas, scipy, Bio, esm, peft
 print('torch       ', torch.__version__, '| cuda', torch.version.cuda)
 print('torch_scatter', torch_scatter.__version__)
+print('torch_sparse ', torch_sparse.__version__)
 print('torch_geometric', torch_geometric.__version__)
 print('numpy       ', numpy.__version__)
 print('sklearn     ', sklearn.__version__)
@@ -46,5 +60,9 @@ print('biopython   ', Bio.__version__)
 print('peft        ', peft.__version__)
 assert numpy.__version__ == '1.24.4' and sklearn.__version__ == '1.3.2', \
     'fold assignment depends on these -- see UPSTREAM.md'
+# the import that actually failed last time
+from torch_geometric.data import HeteroData
+from torch_geometric.loader import DataLoader
+print('torch_geometric.data / .loader import OK')
 PY
 echo "ENV BUILD OK"

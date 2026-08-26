@@ -34,3 +34,20 @@ given. Unchanged when `--fold` is omitted.
 (`seed = index // batch_size`, same-assay batches), `listMLE`, the AdamW/OneCycleLR schedule,
 `epochs = 100`, `patience = 3`, and the selection on the held-out fold's Spearman are all
 untouched: this project reproduces their protocol, including its selection-on-test-fold property.
+
+### 3. Cache `DMS_file_for_LLM`
+
+`DMS_file_for_LLM` runs `.apply(eval)` on `wildtype_sequence`, `mutant` and `mutated_sequence`
+— the last holds whole protein sequences, so this parses tens of MB of Python literals — and then
+walks every row with scalar `df.loc[i, col]` access. Measured on the fold-2 smoke
+(`50852061`): **~80 min** of startup before the first epoch, against ~6.7 min per epoch
+afterwards.
+
+Every job repeats it in full, because the loop preprocesses all 25 assays regardless of which
+fold is being trained. With `--fold` splitting the run into five jobs that is ~6.7h of pure
+repeat work.
+
+The cache key is the source csv's `(mtime, size)` plus `focus`, so editing the data or switching
+`--model_type` invalidates it instead of silently serving a stale frame. Writes go to a
+pid-suffixed temp file then `os.replace`, since five concurrent jobs can race on the same key.
+The frame produced is identical; no protocol behaviour changes.

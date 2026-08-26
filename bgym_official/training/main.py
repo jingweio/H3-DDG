@@ -143,10 +143,28 @@ if training:
         clusters = []
         for i in tqdm(train_df.index):
             DMS_id = train_df.loc[i,'DMS_id']
-            dms_df = pd.read_csv(f'{args.dms_input}/{DMS_id}.csv')
-            # for c in ['mutant','wildtype_sequence','mutated_sequence']:
-            #     dms_df[c] = dms_df[c].apply(eval)
-            dms_df = DMS_file_for_LLM(dms_df,focus=False if args.model_type=='structure' else True)
+            # LOCAL PATCH: cache DMS_file_for_LLM's output.
+            # It runs .apply(eval) on wildtype_sequence / mutant / mutated_sequence -- the last of
+            # which holds whole protein sequences, so this parses tens of MB of literals -- and then
+            # walks every row with scalar df.loc access. Over all 25 assays (376,446 rows) that
+            # measured ~80 min, and it is redone from scratch by every job even though only one
+            # fold's data changes. With --fold splitting the run into five jobs that is ~6.7h of
+            # pure repeat work. The cache is keyed on the source csv's mtime+size and on `focus`,
+            # so editing the data or switching model_type invalidates it rather than silently
+            # serving a stale frame. Output is identical; nothing about the protocol changes.
+            _focus = False if args.model_type=='structure' else True
+            _src = f'{args.dms_input}/{DMS_id}.csv'
+            _st = os.stat(_src)
+            _ck = f'./cache/preproc/{DMS_id}__focus{int(_focus)}__{int(_st.st_mtime)}_{_st.st_size}.pkl'
+            if os.path.exists(_ck):
+                dms_df = pd.read_pickle(_ck)
+            else:
+                dms_df = pd.read_csv(_src)
+                dms_df = DMS_file_for_LLM(dms_df, focus=_focus)
+                os.makedirs('./cache/preproc', exist_ok=True)
+                _tmp = _ck + f'.tmp{os.getpid()}'
+                dms_df.to_pickle(_tmp)
+                os.replace(_tmp, _ck)   # atomic: five concurrent jobs may race on the same key
             # if len(dms_df['wildtype_sequence'].values[0]) > 1000:continue
             print(DMS_id)
             dms_df['DMS_id'] = DMS_id
