@@ -250,6 +250,10 @@ def main():
     param = {k: v for k, v in json.loads(open(cli.config_path).read()).items()
              if not k.startswith('_comment')}
     args = argparse.Namespace(**param)
+    # 'logit_diff' scores the complex alone, so the collate must not emit the isolated-side rows
+    # the thermodynamic cycle needs -- they would double every forward for nothing.
+    _COLLATE = lambda: MPNNPaddingCollate(
+        complex_only=(getattr(args, 'readout', 'cycle') == 'logit_diff'))
     if cli.batch_size is not None:
         args.batch_size = cli.batch_size
     set_seed(args.seed)
@@ -279,7 +283,7 @@ def main():
 
     sampler = AssayBatchSampler(pos, args.batch_size, args.steps_per_epoch, seed=args.seed)
     # placeholder; rebuilt after the probe below, which needs the model on the device
-    train_loader = DataLoader(train_ds, batch_sampler=sampler, collate_fn=MPNNPaddingCollate(),
+    train_loader = DataLoader(train_ds, batch_sampler=sampler, collate_fn=_COLLATE(),
                               num_workers=cli.num_workers)
     # Two selection regimes.
     #  early_stop=True  -> BindingGYM's own: score a selection set every epoch, keep the best
@@ -303,7 +307,7 @@ def main():
         else:
             sel_idx = monitor_subset(val_ds, args.select_per_assay)
         sel_loader = DataLoader(Subset(val_ds, sel_idx), batch_size=args.eval_batch_size,
-                                shuffle=False, collate_fn=MPNNPaddingCollate(),
+                                shuffle=False, collate_fn=_COLLATE(),
                                 num_workers=cli.num_workers)
         say(f'selection subset: {len(sel_idx)} rows')
     else:
@@ -315,7 +319,7 @@ def main():
         say(f'no early stopping; full held-out fold ({len(val_ds)} rows) evaluated at epochs '
             f'{pts} -> {len(pts)} checkpoints')
     full_loader = DataLoader(val_ds, batch_size=args.eval_batch_size, shuffle=False,
-                             collate_fn=MPNNPaddingCollate(), num_workers=cli.num_workers)
+                             collate_fn=_COLLATE(), num_workers=cli.num_workers)
 
     cv = CrossValidation(config=args, num_cvfolds=1, model_factory=DDGPredictor).to('cpu')
     cv.load_mpnn_state_dict(torch.load(args.ckpt_path, map_location='cpu'))
@@ -323,7 +327,7 @@ def main():
     model.to(device)
 
     fit_bs = probe_batch_size(model, train_ds, pos, assay_names, args.batch_size,
-                              MPNNPaddingCollate(), say)
+                              _COLLATE(), say)
     if fit_bs != args.batch_size:
         say(f'!! batch_size reduced {args.batch_size} -> {fit_bs} to fit this GPU. '
             f"BindingGYM's value is 8; the shorter listMLE slate is a weaker ranking signal, "
@@ -331,10 +335,10 @@ def main():
         args.batch_size = fit_bs
         sampler = AssayBatchSampler(pos, fit_bs, args.steps_per_epoch, seed=args.seed)
         train_loader = DataLoader(train_ds, batch_sampler=sampler,
-                                  collate_fn=MPNNPaddingCollate(), num_workers=cli.num_workers)
+                                  collate_fn=_COLLATE(), num_workers=cli.num_workers)
 
     eval_bs = probe_eval_batch_size(model, val_ds, args.eval_batch_size,
-                                    MPNNPaddingCollate(), say)
+                                    _COLLATE(), say)
     if cli.probe_only:
         say(f'PROBE RESULT fold {cli.test_fold}: train batch_size {fit_bs} '
             f'(wanted {param["batch_size"]}), eval_batch_size {eval_bs} '
@@ -346,9 +350,9 @@ def main():
             f'only: complex_row_indices() aligns predictions to metadata at any batch size.')
         args.eval_batch_size = eval_bs
         sel_loader = DataLoader(Subset(val_ds, sel_idx), batch_size=eval_bs, shuffle=False,
-                                collate_fn=MPNNPaddingCollate(), num_workers=cli.num_workers)
+                                collate_fn=_COLLATE(), num_workers=cli.num_workers)
         full_loader = DataLoader(val_ds, batch_size=eval_bs, shuffle=False,
-                                 collate_fn=MPNNPaddingCollate(), num_workers=cli.num_workers)
+                                 collate_fn=_COLLATE(), num_workers=cli.num_workers)
 
     # The optimiser is a MODEL TRAINING PARAMETER, so which side owns it is a deliberate choice,
     # not an implementation detail:

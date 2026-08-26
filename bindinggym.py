@@ -214,6 +214,14 @@ class BindingGYMDataset(Dataset):
             mut_flag[side0[0] if len(side0) else 0] = True
         data['mut_flag'] = mut_flag
 
+        # BindingGYM's readout feeds the decoder the MUTANT sequence with every mutated position
+        # replaced by 'X' during training (dataset.py: `if not self.evaluation: mseq[pos-1]='X'`),
+        # and the unmasked mutant at evaluation time. 'X' is index 20 in both this repo's
+        # ressymb_to_resindex and ProteinMPNN's 'ACDEFGHIKLMNPQRSTVWYX' -- verified identical.
+        aa_masked = aa_mut.clone()
+        aa_masked[mut_flag] = 20
+        data['aa_masked'] = aa_masked
+
         data['mutstr'] = ','.join(
             '{}{}{}{}{}'.format(m['wt'], m['chain'], m['resseq'], m['icode'].strip(), m['mt'])
             for m in entry['mutations'])

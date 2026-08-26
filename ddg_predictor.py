@@ -19,6 +19,14 @@ class DDGPredictor(nn.Module):
                 edges_selection=cfg.edges_selection)
         self.boltzmann_scalar = nn.Parameter(torch.ones((1)))
         self.loss_weight_boltzmann = cfg.loss_weight_boltzmann
+        # 'cycle'      -- H3-DDG's own: complex energy minus each mutated side in isolation (Eq 16).
+        #                 Correct when the label IS a binding free-energy change, as on SKEMPI v2.
+        # 'logit_diff' -- BindingGYM's own: one forward on the complex, score = log p(mut) - log p(wt)
+        #                 at the mutated positions. BindingGYM's labels are DMS fitness / enrichment
+        #                 scores, not free-energy changes, so the cycle would impose a physical
+        #                 meaning the label does not carry. (user, 2026-08-26)
+        self.readout = getattr(cfg, 'readout', 'cycle')
+        assert self.readout in ('cycle', 'logit_diff'), self.readout
         
     def calc_thermodynamic_cycle(self, wt_scores, mut_scores, num_mut_chains, complex_indices, single_chain_indices, device):
         wt_complex_energy = wt_scores.index_select(0,complex_indices)
@@ -53,7 +61,15 @@ class DDGPredictor(nn.Module):
             num_mut_chains: for example [1, 1]/[1, 2]/[2, 1]/[2, 2]
         """
 
-        log_probs = self.mpnn.deterministic_forward(batch['X'], batch['aa'], batch['mask'], batch['chain_M'], batch['residue_idx'], batch['chain_encoding_all'])
+        # The decoder input differs between the two readouts. 'cycle' conditions on the WILD-TYPE
+        # sequence and scores both sequences under that one distribution. 'logit_diff' follows
+        # BindingGYM: condition on the mutant with mutated positions masked to 'X' while training,
+        # and on the unmasked mutant at evaluation time.
+        if self.readout == 'logit_diff':
+            S_in = batch['aa_masked'] if self.training else batch['aa_mut']
+        else:
+            S_in = batch['aa']
+        log_probs = self.mpnn.deterministic_forward(batch['X'], S_in, batch['mask'], batch['chain_M'], batch['residue_idx'], batch['chain_encoding_all'])
 
         wt_scores = _scores(batch['aa'], log_probs, batch['mask'])
         mut_scores = _scores(batch['aa_mut'], log_probs, batch['mask'])
@@ -63,11 +79,18 @@ class DDGPredictor(nn.Module):
         all_indices = torch.arange(0, log_probs.shape[0], device=device)
         single_chain_indices = all_indices[~torch.isin(all_indices, complex_indices)]
 
-        wt_scores_cycle, mut_scores_cycle = self.calc_thermodynamic_cycle(wt_scores, mut_scores, batch['num_mut_chains'], complex_indices, single_chain_indices, device)
-        
-        mut_scores_cycle = mut_scores_cycle * self.boltzmann_scalar
-        wt_scores_cycle = wt_scores_cycle * self.boltzmann_scalar
-        ddg_pred = (mut_scores_cycle - wt_scores_cycle)
+        if self.readout == 'logit_diff':
+            # _scores is an NLL, so mut - wt = -[log p(mut) - log p(wt)]. Our label is
+            # ddG = -DMS_score, and a higher DMS_score means a better binder, so both sides are
+            # "larger is worse" and the directions already agree -- no sign flip.
+            # Summing over the whole complex is what BindingGYM does too; positions that are not
+            # mutated hold the same token in aa and aa_mut and cancel in the difference.
+            ddg_pred = (mut_scores - wt_scores).index_select(0, complex_indices)
+        else:
+            wt_scores_cycle, mut_scores_cycle = self.calc_thermodynamic_cycle(wt_scores, mut_scores, batch['num_mut_chains'], complex_indices, single_chain_indices, device)
+            mut_scores_cycle = mut_scores_cycle * self.boltzmann_scalar
+            wt_scores_cycle = wt_scores_cycle * self.boltzmann_scalar
+            ddg_pred = (mut_scores_cycle - wt_scores_cycle)
 
         loss = F.mse_loss(ddg_pred, batch['ddG'][complex_indices]) * self.loss_weight_boltzmann
         out_dict = {

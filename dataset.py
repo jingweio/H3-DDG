@@ -82,10 +82,14 @@ def reset_residue_idx(res_nb):
 
 class MPNNPaddingCollate(PaddingCollate):
 
-    def __init__(self, length_ref_key='aa', pad_values=MPNN_PAD_VALUES):
+    def __init__(self, length_ref_key='aa', pad_values=MPNN_PAD_VALUES, complex_only=False):
         super().__init__(length_ref_key=length_ref_key, pad_values=pad_values)
         self.length_ref_key = length_ref_key
         self.pad_values = pad_values
+        # complex_only skips the isolated-side rows. They exist only for the thermodynamic cycle
+        # (complex energy minus each mutated side in isolation); BindingGYM's readout scores the
+        # complex alone, so emitting them would double the forward cost for nothing.
+        self.complex_only = complex_only
 
     def __call__(self, data_list):
         max_length = max([data[self.length_ref_key].size(0) for data in data_list])
@@ -98,6 +102,7 @@ class MPNNPaddingCollate(PaddingCollate):
                 'X': data['pos_atoms'][...,:4,:],
                 'aa': data['aa'], 
                 'aa_mut': data['aa_mut'],
+                'aa_masked': data['aa_masked'],
                 'mask': torch.ones_like(data['aa']),
                 'chain_M': data['mut_flag'],
                 'chain_encoding_all': data['chain_nb']+1,
@@ -111,6 +116,11 @@ class MPNNPaddingCollate(PaddingCollate):
             mpnn_data_padded = {k: self._pad_last(v, max_length, value=self._get_pad_value(k)) for k, v in mpnn_data.items()}
             data_list_padded.append(mpnn_data_padded)
             
+            if self.complex_only:
+                # 0 sides per item, so complex_row_indices() yields 0..n-1 -- every row is a complex
+                num_mut_chains.append(0)
+                continue
+
             mut_indices = torch.nonzero(data['mut_flag'], as_tuple=True)[0]
             mut_chains = torch.unique(mpnn_data['chain_encoding_all'][mut_indices], dim=0)
             num_mut_chains.append(mut_chains.size(0))
@@ -123,6 +133,7 @@ class MPNNPaddingCollate(PaddingCollate):
                 single_chain_mpnn_data_padded['X'] = single_chain_mpnn_data_padded['X'] * chain_mask[:,None,None]
                 single_chain_mpnn_data_padded['aa'] = single_chain_mpnn_data_padded['aa'] * chain_mask
                 single_chain_mpnn_data_padded['aa_mut'] = single_chain_mpnn_data_padded['aa_mut'] * chain_mask
+                single_chain_mpnn_data_padded['aa_masked'] = single_chain_mpnn_data_padded['aa_masked'] * chain_mask
                 data_list_padded.append(single_chain_mpnn_data_padded)
         batch = default_collate(data_list_padded)
         batch['num_mut_chains'] = num_mut_chains
