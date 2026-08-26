@@ -12,6 +12,11 @@
 # untouched: same-assay batches, listMLE, AdamW 1e-3 / wd 0.05 / OneCycleLR, 256 steps per epoch,
 # 100 epochs, patience 3, and epoch selection on the held-out fold's Spearman.
 #
+# --resume is always on (patched into upstream; see PATCHES.md). It is a no-op on a fresh run and
+# the difference between "continue" and "lose the fold" on a re-submission -- which f0/f3 will
+# need, since scoring the full held-out fold every epoch (patience-3's precondition) costs ~1.6h
+# per epoch there.
+#
 # All five folds share --tmp_path on purpose. Upstream writes one {DMS_id}_oof.csv per assay and
 # each assay is held out in exactly one fold, so the five jobs assemble the complete
 # out-of-fold set without a merge step. The log is per-fold (patched) so they do not truncate
@@ -45,6 +50,7 @@ srun python main.py \
   --structure_path ../input/structures \
   --model_type structure --mode inter --split cluster \
   --use_weight pretrained --batch_size 8 --seed 42 \
-  --fold "${FOLD}" --tmp_path "${TMP}"
+  --fold "${FOLD}" --tmp_path "${TMP}" \
+  --resume
 
 echo "=== fold ${FOLD} DONE ==="

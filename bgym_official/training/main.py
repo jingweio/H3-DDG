@@ -36,6 +36,14 @@ parser.add_argument('--seed', type=int, default=42, help='')
 # belongs to exactly one fold, so five jobs sharing --tmp_path produce the same file set as one.
 parser.add_argument('--fold', type=int, default=-1,
                     help='train/evaluate ONLY this fold (0..4). -1 keeps upstream behaviour.')
+# LOCAL PATCH: upstream has no checkpointing, so a job killed at walltime loses the whole fold.
+# That is fatal rather than merely wasteful here: patience-3 early stopping needs the full
+# held-out fold scored EVERY epoch, and on f3 (142,905 rows, structures up to 1041 residues) that
+# measured ~1.6h per epoch -- so f0/f3 need 24-32h to reach a plausible stopping point, past any
+# walltime that schedules on this account (16-18h jobs have sat pending five days; 7h starts in
+# ~11h).
+parser.add_argument('--resume', action='store_true',
+                    help='continue this fold from its last completed epoch, if a state file exists.')
 
 args, unknown = parser.parse_known_args()
 
@@ -435,7 +443,46 @@ if training:
         scheduler = torch.optim.lr_scheduler.OneCycleLR(optimizer, max_lr=lr, steps_per_epoch=len(train_dataloader), epochs=100)
         
         not_improve_epochs = 0
-        for epoch in range(epochs):
+        best_model = None
+        best_valid_pred = None
+        _start_epoch = 0
+        # LOCAL PATCH: per-fold resume state. Everything the loop carries across epochs belongs
+        # here, not just the weights -- in particular best_valid_pred, which is what the OOF is
+        # written from (`fold_valid['pred'] = best_valid_pred`). Restoring weights without it
+        # would finish the run and then emit an empty prediction column.
+        # RNG state is included because the model draws a fresh decoding order from the global
+        # torch RNG on every training forward (`if self.randn is None or self.training: randn =
+        # torch.randn(...)`), so replaying that stream from scratch would put a resumed run on a
+        # different trajectory than an uninterrupted one.
+        _state_path = output_path + f'resume_fold{fold}.pt'
+        _skip_training = False
+        if args.resume and os.path.exists(_state_path):
+            _b = torch.load(_state_path, map_location='cpu')
+            model.load_state_dict(_b['model']); model.cuda()
+            optimizer.load_state_dict(_b['optimizer'])
+            scheduler.load_state_dict(_b['scheduler'])
+            best_model = _b['best_model']
+            best_valid_metric = _b['best_valid_metric']
+            best_valid_pred = _b['best_valid_pred']
+            not_improve_epochs = _b['not_improve_epochs']
+            _start_epoch = _b['epoch'] + 1
+            torch.set_rng_state(_b['rng_torch'])
+            np.random.set_state(_b['rng_numpy'])
+            if _b.get('rng_cuda') is not None:
+                torch.cuda.set_rng_state_all(_b['rng_cuda'])
+            Write_log(log, '[resume] fold%s: epoch %s done, best spearman %.6f, NIE %s/%s; continuing at %s/%s'
+                      % (fold, _b['epoch'], best_valid_metric, not_improve_epochs, patience, _start_epoch, epochs))
+            if not_improve_epochs >= patience:
+                # Early stopping had already fired. Upstream's check sits at the END of the loop
+                # body, so re-entering would train one more epoch before noticing -- and if that
+                # epoch beat `best` it would change which weights the run selects, making a
+                # resumed run differ from an uninterrupted one.
+                Write_log(log, '[resume] fold%s: early stopping had already fired; skipping to output' % fold)
+                _skip_training = True
+        elif args.resume:
+            Write_log(log, '[resume] fold%s: no state at %s; starting from scratch' % (fold, _state_path))
+
+        for epoch in (range(_start_epoch, epochs) if not _skip_training else []):
             np.random.seed(666*epoch)
             train_dataset.seed_bias = epoch
             train_loss = 0.0
@@ -647,6 +694,23 @@ if training:
                 Write_log(log,'unbias20_test precision: %.6f, recall: %.6f, f1: %.6f'%(valid_metrics['unbias20_precision_recall_f1'][0],valid_metrics['unbias20_precision_recall_f1'][1],valid_metrics['unbias20_precision_recall_f1'][2]))
                 Write_log(log,'unbias50_test precision: %.6f, recall: %.6f, f1: %.6f'%(valid_metrics['unbias50_precision_recall_f1'][0],valid_metrics['unbias50_precision_recall_f1'][1],valid_metrics['unbias50_precision_recall_f1'][2]))
                 Write_log(log,'unbias100_test precision: %.6f, recall: %.6f, f1: %.6f'%(valid_metrics['unbias100_precision_recall_f1'][0],valid_metrics['unbias100_precision_recall_f1'][1],valid_metrics['unbias100_precision_recall_f1'][2]))
+            # LOCAL PATCH: persist after every epoch, via a pid-suffixed temp plus os.replace so
+            # a kill mid-write cannot corrupt the only copy.
+            _tmp = _state_path + '.tmp%s' % os.getpid()
+            torch.save({'epoch': epoch,
+                        'model': model.module.state_dict() if len(gpus) > 1 else model.state_dict(),
+                        'optimizer': optimizer.state_dict(),
+                        'scheduler': scheduler.state_dict(),
+                        'best_model': best_model,
+                        'best_valid_metric': best_valid_metric,
+                        'best_valid_pred': best_valid_pred,
+                        'not_improve_epochs': not_improve_epochs,
+                        'rng_torch': torch.get_rng_state(),
+                        'rng_numpy': np.random.get_state(),
+                        'rng_cuda': torch.cuda.get_rng_state_all() if torch.cuda.is_available() else None,
+                        }, _tmp)
+            os.replace(_tmp, _state_path)
+
             if not_improve_epochs >= patience:
                 break
         if args.mode == 'intra':

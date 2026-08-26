@@ -51,3 +51,32 @@ The cache key is the source csv's `(mtime, size)` plus `focus`, so editing the d
 `--model_type` invalidates it instead of silently serving a stale frame. Writes go to a
 pid-suffixed temp file then `os.replace`, since five concurrent jobs can race on the same key.
 The frame produced is identical; no protocol behaviour changes.
+
+### 4. `--resume`
+
+Upstream has no checkpointing, so a job killed at walltime loses the entire fold. That is fatal
+rather than merely wasteful here, because patience-3 early stopping requires the full held-out
+fold to be scored **every** epoch. Measured on f3 (`50878825`, 142,905 rows, structures up to 1041
+residues): **~1.6h per epoch**, so f0/f3 need 24–32h to reach a plausible stopping point — past any
+walltime that schedules on this account (16–18h jobs have sat pending five days; 7h has started in
+~11h). The f3 measurement job demonstrated the failure directly: it timed out having completed one
+epoch, and kept nothing.
+
+State is written after every epoch, to a pid-suffixed temp file then `os.replace`, so a kill
+mid-write cannot corrupt the only copy. Saved:
+
+| field | why it must be saved |
+|---|---|
+| `model`, `optimizer`, `scheduler` | the obvious three; `scheduler` matters because OneCycleLR's position in its cycle sets the LR |
+| `best_model` | the weights the fold will emit |
+| **`best_valid_pred`** | what the OOF is written from (`fold_valid['pred'] = best_valid_pred`). Restoring weights without it would finish the run and emit an empty prediction column |
+| `best_valid_metric`, `not_improve_epochs` | the early-stopping state; without them a resumed run would restart the patience counter and train longer than an uninterrupted one |
+| `rng_torch`, `rng_numpy`, `rng_cuda` | the model draws a fresh decoding order from the global torch RNG on every training forward (`if self.randn is None or self.training: randn = torch.randn(...)`). Replaying that stream from scratch puts a resumed run on a different trajectory. The same fix was needed, and verified, on the H3-DDG side of this repo |
+
+One asymmetry handled explicitly: upstream's patience check sits at the **end** of the loop body,
+so a run resumed after early stopping had already fired would train one more epoch before
+noticing — and if that epoch beat `best`, it would change which weights the fold selects. Resume
+therefore checks `not_improve_epochs >= patience` before entering the loop and goes straight to
+output.
+
+`--resume` defaults off, so behaviour without it is unchanged.
