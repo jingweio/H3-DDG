@@ -83,3 +83,22 @@ numpy 1.24.4 · scikit-learn 1.3.2 · pandas 2.0.3 · scipy 1.10.1 · biopython 
 ## 6. 与 `bindingGYM-reproduce` 项目的边界
 
 本项目**不涉及 H3-DDG**，不改动 `bindingGYM-reproduce` 的任何代码、配置或作业。共享的只有：本分支 `data/input/` 的原始数据、以及已固化的 `data_splits/inter_assay_folds.tsv`（用于把官方逐 assay 结果重构成逐 fold 分项）。
+
+---
+
+## 附：突变位点 masking 的跨方法对照
+
+官方微调在**训练时**把所有突变位点置 `'X'`（`training/dataset.py:97`，评测时不置）。这一步在论文
+与代码里都没有任何论证，且对多点突变有实际后果。
+
+完整的四套对照（BindingGYM 官方微调 / H3-DDG over SKEMPIv2 / StaB-ddG over Megascale /
+StaB-ddG over SKEMPIv2），含实测证据，写在姊妹项目的记录里：
+`ibex-records/bindingGYM-reproduce/bindinggym_interassay_h3ddg_20260817-092000.md` **§5.21**。
+
+对本项目最要紧的两条：
+
+1. 我们**照做**了这个 masking（跑的就是他们的代码，未改），所以复现结果继承它的全部性质，包括
+   训练/评测的不一致。
+2. 实测表明 `'X'` 并**不**影响被打分位点自身（自回归掩码已保证 Δ = 0），它屏蔽的是**突变位点
+   之间的互见** —— 这使 score 在序列层面被强制成可加的，多点突变的 epistasis 不可学。而
+   BindingGYM 是多点突变主导的库。

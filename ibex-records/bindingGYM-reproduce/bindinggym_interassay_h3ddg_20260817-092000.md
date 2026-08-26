@@ -1163,6 +1163,81 @@ BindingGYM 官方口径：ALL Spearman 0.2311 / AUC 0.6249 / MCC 0.0263 / NDCG 0
 
 参照：论文 Table 2 = 0.2725；官方 ProteinMPNN 微调的 f1 分项（本记录重构）= 0.2719。
 
+## 5.21 突变位点 masking：四套做法的对照（2026-08-26）
+
+起因是 §5.20 的 readout 修正。把「给突变位点 *i* 打分时，其他位点在上下文里显示成什么」这个问题
+拉通看，四套做法其实只分三类。验证脚本 `diagnostics/check_ar_masking.py`。
+
+### 对照表
+
+| | **BindingGYM 官方微调** | **H3-DDG / SKEMPIv2** | **StaB-ddG / Megascale** | **StaB-ddG / SKEMPIv2** |
+|---|---|---|---|---|
+| 训练时 ctx-seq | 突变序列，**突变位点置 `'X'`** | **野生型** `aa` | 各序列**条件在自身** | 同左 |
+| 评测时 ctx-seq | 突变序列，**不置 X** | 野生型（同训练）| 同训练 | 同训练 |
+| **`'X'` 掩码** | **有（仅训练）** | **无** | **无** | **无** |
+| 前向次数 | **1**（只 complex）| 1（wt 条件下一次算完）| **2**（wt / mut 各一次）| **6**（complex+binder1+binder2 × wt/mut）|
+| readout | `Σ[logit(mut)−logit(wt)]`，同一分布 | 热力学循环（式 16）| `dG = Σ onehot(seq)·log_probs`；`ddG = mut_dG − wt_dG` | StaB 参数化 `b = f(AB) − f(A) − f(B)` |
+| 解码顺序 | `argsort((chain_M+1e-4)·\|randn\|)`，chain_M 全 1 → **完全随机** | chain_M = **mut_flag** → **突变位点排最后** | `argsort(\|randn\|)`，**wt/mut 共用同一份** | 同左 |
+| 骨架噪声 | `augment_eps = 0.2` | **0.0** | `noise_level = 0.1`，**wt/mut 共用同一份** | 同左 |
+| 评测集成 | 无 | 无 | 训练单次，**评测 `ensemble=20` 平均** | 同左 |
+
+出处：BindingGYM `training/{dataset.py:96-97, protein_mpnn_utils.py::ProteinMPNN.forward}`；
+本仓库 `ddg_predictor.py:56` + `dataset.py::MPNNPaddingCollate`（`'chain_M': data['mut_flag']`）；
+StaB-ddG `stabddg/model.py::{folding_dG, folding_ddG, binding_ddG, _get_decoding_order, _get_backbone_noise}`。
+
+### `'X'` 到底屏蔽了什么 —— 实测，不是推断
+
+在 1BE9 上做单点人工突变，固定同一个解码顺序，对比 `S = 突变序列` 与 `S = 突变序列且该位点置 X`：
+
+| 位点类别 | max\|Δ log-prob\| |
+|---|---|
+| **突变位点自身** | **0.000e+00** |
+| 解码顺序**排在它之前**的位点 | **0.000e+00** |
+| 解码顺序**排在它之后**的位点（116 个）| **2.348e+00** |
+
+**自回归掩码已经保证位点 *i* 的 logits 完全不依赖 `S[i]`**，所以 `'X'` 对被打分的位点本身毫无影响。
+它真正做的是**让后续解码的位点看不到这里发生了突变** —— 即屏蔽突变位点之间的互见。
+
+（三点突变的版本里「突变位点自身」那一格是 0.247 而非 0，正是因为位点 10 的解码名次 112 排在位点
+40 的名次 3 和位点 70 的名次 64 之后 —— 它看见的是**另外两个**突变位点的变化。单点时归零。）
+
+### 三类，不是四类
+
+**① BindingGYM** —— 唯一做 `'X'` 掩码，且**训练/评测不一致**。位点 *i* 看到的其他突变位点：训练时是
+`'X'`，评测时是突变残基。
+
+**② H3-DDG** —— 不掩码，但 ctx 永远是野生型。位点 *i* 看到的其他突变位点是**野生型残基**。这其实是
+**比 `'X'` 更强的一种屏蔽**：上下文里连「这里发生了突变」这件事都不透露，而 `'X'` 至少透露了「此处未知」。
+它的多体建模因此**不在序列条件上**，而在架构侧（hypergraph pooling + 3-body/4-body attention）。
+
+**③ StaB-ddG** —— 不掩码，且 mut 那次前向里位点 *i* **看得到全部其他突变**，所以 epistasis 可以通过
+自回归条件天然进入。代价是 2 次（folding）或 6 次（binding）前向。方差控制走另一条路：wt/mut 两次
+前向**共用同一个解码顺序与同一份骨架噪声**（antithetic variates），评测再做 20 次集成。
+
+### 一个有实际后果的推论
+
+**只有 StaB-ddG 的 mut 前向能在序列层面表达 epistasis。** BindingGYM 训练时把突变位点互相屏蔽、
+H3-DDG 的 ctx 永远是野生型 —— 两者的 score 在序列层面都被强制成**可加**的。
+
+而 BindingGYM 是多点突变主导的库（f1 有 **98.6%** 是 ≥3 点），所以这不是学术细节。它也正好是 H3-DDG
+声称要补的那一块（论文摘要的 "higher-order and many-body interactions"）—— 只不过 H3-DDG 是从
+**结构侧**补，不是从序列条件侧。
+
+### ⚠️ BindingGYM 的 masking 没有任何论证
+
+搜遍论文与仓库：
+
+- **论文全文 "mask" 只出现 1 次**（A.3.2 那句陈述），正文（§3 数据集、§4 实验）一字未提；该段唯一的
+  引用 `[32]` 是 ListMLE（Xia et al.），指损失函数而非 masking
+- **代码里 `mseq[pos-1] = 'X'` 是全仓库唯一一处，零注释**；README 与 `new_dataset_construction_guide.md`
+  里 "mask" 一次都没出现
+- 「为什么 mask」「为什么评测时不 mask」「多点突变下 epistasis 变得不可学」这三点**都没有被讨论**
+
+所以本记录里对其动机的解释（屏蔽突变位点互见、强制 score 可加）**是本项目的推断，不是原作者的说法**。
+一个可能的来源猜测（同样只是猜测）：masked-marginal 是 ESM-1v 以来变体打分的惯例，但那套做法里 mask
+的目的是让被打分位点看不见自己 —— 而在自回归 inverse-folding 里这一点由解码掩码天然保证（上面实测
+Δ = 0），所以这里的 masking 实际在做另一件事。看起来像是把序列模型的惯例直接搬了过来。
+
 ## 6. Change log
 
 - **2026-08-17 09:20**：写下 plan；数据下载、inter-assay split 复现、突变映射验证完成。
@@ -1191,3 +1266,4 @@ _(待所有 job 完成后填写)_
 - **2026-08-25 10:5x**：🎯 **f1 strategy 臂完成**（`50829137`，1:37:47，A100-80GB）。**只换 data loading 与损失，Spearman 从 A.4 臂的 0.0904 升到 0.2311（2.56×），达论文 0.2725 的 85%；AUROC 0.6283 反超论文 0.5703。塌缩消失，§5.10 的诊断确证 —— 根因是训练配方。** 但选择集指标 epoch 间摆动 ±0.2，patience 3 在 epoch 6 误杀，只用掉 19,968 步预算的 9%，最优权重来自 epoch 3；根源是我为省算力把每-epoch 选择集从官方的全量 fold 缩到 300 行/assay（§5.18）。
 - **2026-08-25 11:2x**：四出处逐项溯源训练策略（§5.19）。**关键：两个数据集都没有 validation split，早停与模型选择用的都是测试 fold 本身**（H3-DDG 是事后 `validate_all.py` 扫 checkpoint、BindingGYM 是训练中 `best_model` + patience 3）；H3-DDG **完全没有早停**。BindingGYM 的「100 epochs」= 256 batch/epoch，batch 8 时仅 0.64 个真实 pass；其 25,600 步与 H3-DDG 的 20,000 步只差 28%，两预算相容。但我们每 epoch 的训练:评测算力比是 1:215（官方低一个量级以上），故「照抄每-epoch 全量评测」在我们模型上不等价。
 - **2026-08-25 12:1x**：新增 **bgymfull 臂**（§5.20）—— 按用户判断（A.4 描述的是 SKEMPI 实验，不该作为 BindingGYM 的规格）全面采用 BindingGYM 官方配置：AdamW 1e-3/wd 0.05/OneCycleLR、listMLE、100 epoch、patience 3、**全量 held-out fold 做选择集**（新增 `select_per_assay: 0` 支持）、batch_size 8（探测会下调）；只保留 H3-DDG 的热力学循环与 `backbone_noise 0.0`。提交 `50844967`（f1，7h）。full-fold 选择集使每 epoch 约 1.0h，7h 约覆盖 6 epoch，靠 `--resume` 跨轮续跑。
+- **2026-08-26 20:0x**：写入突变位点 masking 的四套对照（§5.21）。实测证明 `'X'` 不影响被打分位点自身（AR 掩码已保证，Δ=0），真正屏蔽的是**突变位点之间的互见**。三类：BindingGYM 唯一做掩码且训练/评测不一致；H3-DDG 不掩码但 ctx 永远是野生型（更强的屏蔽）；StaB-ddG 不掩码且 mut 前向看得到全部突变，靠共用解码顺序+骨架噪声与 20 次集成控方差。**只有 StaB-ddG 能在序列层面表达 epistasis。** BindingGYM 的 masking 在论文与代码中均无任何论证。
