@@ -5,10 +5,14 @@ Convention B: row-pooled std over the whole slice               (a plain global 
 Candidate sets: each of the 5 folds, and all 25 assays (i.e. the full OOF, all folds merged).
 Target from Table 2: RMSE(>=3)/RMSE(ALL) ~ 2.08-2.35 for every method; <3/ALL ~ 0.87-0.95.
 """
+import os
 import ast
 import numpy as np, pandas as pd
 
 repo = '/home/guoj0f/repos/H3-DDG/.claude/worktrees/reproduce'
+# BindingGYM's raw data lives in the shared store (see bindinggym_dataset.py). Same env var,
+# same fallback, so this script keeps working wherever the data actually is.
+INPUT = os.environ.get('BINDINGGYM_INPUT', f'{repo}/data/input')
 folds = pd.read_csv(f'{repo}/data_splits/inter_assay_folds.tsv', sep='\t', comment='#')
 MIN = 100
 
@@ -18,7 +22,7 @@ def nmut(cell):
 
 cache = {}
 for _, r in folds.iterrows():
-    src = pd.read_csv(f'{repo}/data/input/Binding_substitutions_DMS/{r.DMS_id}.csv')
+    src = pd.read_csv(f'{INPUT}/Binding_substitutions_DMS/{r.DMS_id}.csv')
     cache[r.DMS_id] = (src['mutant_pdb'].fillna('{}').apply(nmut).values,
                        src['DMS_score'].values.astype(np.float64), r.test_fold)
 

@@ -57,7 +57,8 @@ def fingerprint(dms_to_fold):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument('--mapping', default='./data/input/BindingGYM.csv')
+    ap.add_argument('--mapping', default=os.path.join(
+        os.environ.get('BINDINGGYM_INPUT', './data/input'), 'BindingGYM.csv'))
     ap.add_argument('--cluster_tsv', default='./data_splits/BindingGYM_cluster.tsv')
     ap.add_argument('--out', default='./data_splits/inter_assay_folds.tsv')
     ap.add_argument('--allow_any_version', action='store_true',

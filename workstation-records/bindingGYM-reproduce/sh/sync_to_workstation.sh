@@ -18,7 +18,7 @@ set -euo pipefail
 SRC="$(git -C "$(dirname "$0")" rev-parse --show-toplevel)/"
 BRANCH="$(git -C "$SRC" rev-parse --abbrev-ref HEAD)"
 [ "$BRANCH" = "reproduce" ] || { echo "FATAL: on branch '$BRANCH', expected 'reproduce' (skill §4-1)"; exit 1; }
-DEST=guoj0f@10.67.24.41:/data/guoj0f/repos/H3-DDG/reproduce/
+DEST=guoj0f@10.67.24.41:/home/guoj0f/repos/H3-DDG/reproduce/
 
 EXCL=(
   --exclude .git --exclude .claude/worktrees
@@ -50,7 +50,7 @@ if [ -n "$STALE" ]; then
   echo "  ⚠ present on the workstation but NOT local -- stale code can be imported silently."
   echo "$STALE" | sed 's/^/      /'
   echo "  Review, then remove deliberately if they are indeed stale:"
-  echo "      ssh guoj0f@10.67.24.41 'cd /data/guoj0f/repos/H3-DDG/reproduce && rm -i <path>'"
+  echo "      ssh guoj0f@10.67.24.41 'cd /home/guoj0f/repos/H3-DDG/reproduce && rm -i <path>'"
 else
   echo "  ✓ no stale files; nothing pending"
 fi

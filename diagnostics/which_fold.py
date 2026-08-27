@@ -3,10 +3,14 @@
 Counts mutations exactly as bindinggym.py does: mutant_pdb is a dict-string {chain: 'A1B:C2D'},
 so parse the dict, then split each chain's value on ':'.
 """
+import os
 import ast
 import pandas as pd
 
 repo = '/home/guoj0f/repos/H3-DDG/.claude/worktrees/reproduce'
+# BindingGYM's raw data lives in the shared store (see bindinggym_dataset.py). Same env var,
+# same fallback, so this script keeps working wherever the data actually is.
+INPUT = os.environ.get('BINDINGGYM_INPUT', f'{repo}/data/input')
 folds = pd.read_csv(f'{repo}/data_splits/inter_assay_folds.tsv', sep='\t', comment='#')
 
 def nmut(cell):
@@ -15,7 +19,7 @@ def nmut(cell):
 
 rows = []
 for _, r in folds.iterrows():
-    src = pd.read_csv(f'{repo}/data/input/Binding_substitutions_DMS/{r.DMS_id}.csv')
+    src = pd.read_csv(f'{INPUT}/Binding_substitutions_DMS/{r.DMS_id}.csv')
     nm = src['mutant_pdb'].fillna('{}').apply(nmut)
     rows.append(dict(fold=r.test_fold, DMS_id=r.DMS_id, n=len(src),
                      n_ge3=int((nm >= 3).sum()), n_ge2=int((nm >= 2).sum()),

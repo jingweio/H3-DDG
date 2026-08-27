@@ -8,18 +8,22 @@ If (a) alone were doing the work, (b) would be a no-op. Test it directly: same s
 decoding order, S = mutant vs S = mutant-with-X, and compare logits at the mutated positions
 against logits everywhere else.
 """
+import os
 import sys, torch, numpy as np
 sys.path.insert(0, '/home/guoj0f/repos/BindingGYM/baselines/protein_mpnn')
 from protein_mpnn_utils import ProteinMPNN, parse_PDB, tied_featurize
 
 R='/home/guoj0f/repos/H3-DDG/.claude/worktrees/reproduce'
+# BindingGYM's raw data lives in the shared store (see bindinggym_dataset.py). Same env var,
+# same fallback, so this script keeps working wherever the data actually is.
+INPUT = os.environ.get('BINDINGGYM_INPUT', f'{R}/data/input')
 dev=torch.device('cuda')
 m=ProteinMPNN(num_letters=21,node_features=128,edge_features=128,hidden_dim=128,
               num_encoder_layers=3,num_decoder_layers=3,augment_eps=0.0,k_neighbors=48,ca_only=False)
 m.load_state_dict(torch.load('/home/guoj0f/repos/BindingGYM/training/cache/v_48_020.pt',
                              map_location='cpu')['model_state_dict']); m.to(dev).eval()
 
-d=parse_PDB(f'{R}/data/input/structures/1BE9_hm.pdb', ca_only=False)
+d=parse_PDB(f'{INPUT}/structures/1BE9_hm.pdb', ca_only=False)
 ch=sorted([k[-1:] for k in d[0] if k[:9]=='seq_chain'])
 b=tied_featurize(d,'cpu',{d[0]['name']:(ch,[])},None,None,None,None,None,ca_only=False)
 X,S,mask,chain_M,residue_idx,chain_enc = b[0],b[1],b[2],b[4],b[12],b[5]

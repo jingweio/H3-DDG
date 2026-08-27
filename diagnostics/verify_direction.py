@@ -27,8 +27,9 @@ import pandas as pd
 from scipy.stats import spearmanr
 
 REPO = os.path.dirname(os.path.abspath(__file__)) + '/..'
-
-
+# BindingGYM's raw data lives in the shared store (see bindinggym_dataset.py). Same env var,
+# same fallback, so this script keeps working wherever the data actually is.
+INPUT = os.environ.get('BINDINGGYM_INPUT', f'{REPO}/data/input')
 def nmut(cell):
     d = ast.literal_eval(cell) if isinstance(cell, str) and cell.strip() else {}
     return sum(len([t for t in str(v).split(':') if t]) for v in d.values())
@@ -37,7 +38,7 @@ def nmut(cell):
 folds = pd.read_csv(f'{REPO}/data_splits/inter_assay_folds.tsv', sep='\t', comment='#')
 rows = []
 for _, r in folds.iterrows():
-    d = pd.read_csv(f'{REPO}/data/input/Binding_substitutions_DMS/{r.DMS_id}.csv')
+    d = pd.read_csv(f'{INPUT}/Binding_substitutions_DMS/{r.DMS_id}.csv')
     nm = d['mutant_pdb'].fillna('{}').apply(nmut).values
     y = d['DMS_score'].values.astype(np.float64)
     wt = np.where(nm == 0)[0]

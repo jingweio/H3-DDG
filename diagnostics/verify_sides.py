@@ -33,6 +33,9 @@ from Bio.PDB.Selection import unfold_entities
 
 warnings.filterwarnings('ignore')
 REPO = os.path.dirname(os.path.abspath(__file__)) + '/..'
+# BindingGYM's raw data lives in the shared store (see bindinggym_dataset.py). Same env var,
+# same fallback, so this script keeps working wherever the data actually is.
+INPUT = os.environ.get('BINDINGGYM_INPUT', f'{REPO}/data/input')
 CONTACT_A = 5.0          # heavy-atom distance defining a residue-residue contact
 
 
@@ -78,13 +81,13 @@ def nmuts_by_chain(cell):
 
 def main():
     sides = pd.read_csv(f'{REPO}/data_splits/assay_chain_sides.tsv', sep='\t', comment='#')
-    mapping = pd.read_csv(f'{REPO}/data/input/BindingGYM.csv').set_index('DMS_id')
+    mapping = pd.read_csv(f'{INPUT}/BindingGYM.csv').set_index('DMS_id')
 
     problems = []
     for _, row in sides.iterrows():
         dms = row.DMS_id
         m = mapping.loc[dms]
-        pdb = f"{REPO}/data/input/structures/{m.pdb_file}"
+        pdb = f"{INPUT}/structures/{m.pdb_file}"
         s0, s1 = list(str(row.side0_chains)), list(str(row.side1_chains))
         print('=' * 100)
         print(f'{dms}\n  pdb {m.pdb_file}   declared  side0={"".join(s0)}  side1={"".join(s1)}'
@@ -132,7 +135,7 @@ def main():
                   f'{weak} -- the partition may have cut the wrong seam')
 
         # --- check 4: where the mutations live
-        dfm = pd.read_csv(f"{REPO}/data/input/Binding_substitutions_DMS/{m.DMS_filename}")
+        dfm = pd.read_csv(f"{INPUT}/Binding_substitutions_DMS/{m.DMS_filename}")
         cnt = {}
         for cell in dfm['mutant_pdb'].fillna('{}'):
             for ch, n in nmuts_by_chain(cell).items():

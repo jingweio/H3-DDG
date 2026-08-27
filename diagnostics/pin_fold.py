@@ -10,10 +10,14 @@ Metrics are per-DMS equal-weight averages, so ALL ~ <3 requires that, within eac
 assay, the <3 rows OUTNUMBER the >=3 rows.  Only some folds can do that.
 Also checks which folds can even populate all three columns under BindingGYM's >=100-row filter.
 """
+import os
 import ast
 import pandas as pd
 
 repo = '/home/guoj0f/repos/H3-DDG/.claude/worktrees/reproduce'
+# BindingGYM's raw data lives in the shared store (see bindinggym_dataset.py). Same env var,
+# same fallback, so this script keeps working wherever the data actually is.
+INPUT = os.environ.get('BINDINGGYM_INPUT', f'{repo}/data/input')
 folds = pd.read_csv(f'{repo}/data_splits/inter_assay_folds.tsv', sep='\t', comment='#')
 MIN = 100
 
@@ -23,7 +27,7 @@ def nmut(cell):
 
 recs = []
 for _, r in folds.iterrows():
-    src = pd.read_csv(f'{repo}/data/input/Binding_substitutions_DMS/{r.DMS_id}.csv')
+    src = pd.read_csv(f'{INPUT}/Binding_substitutions_DMS/{r.DMS_id}.csv')
     nm = src['mutant_pdb'].fillna('{}').apply(nmut)
     recs.append(dict(fold=r.test_fold, DMS_id=r.DMS_id, n_all=len(src),
                      n_lt3=int(((nm >= 1) & (nm < 3)).sum()), n_ge3=int((nm >= 3).sum())))

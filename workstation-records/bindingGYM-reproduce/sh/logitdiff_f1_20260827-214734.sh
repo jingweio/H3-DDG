@@ -14,7 +14,7 @@ set -euo pipefail
 source /data/guoj0f/miniconda3/etc/profile.d/conda.sh
 conda activate h3ddg-reproduce
 
-ROOT=/data/guoj0f/repos/H3-DDG/reproduce
+ROOT=/home/guoj0f/repos/H3-DDG/reproduce
 cd "$ROOT"
 echo "[synced_commit] $(head -1 .synced_commit 2>/dev/null)"
 echo "[dirty]         $(tail -n +2 .synced_commit 2>/dev/null | wc -l) uncommitted file(s) at sync time"
