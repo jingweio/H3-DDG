@@ -19,6 +19,13 @@ cd "$ROOT"
 echo "[synced_commit] $(head -1 .synced_commit 2>/dev/null)"
 echo "[dirty]         $(tail -n +2 .synced_commit 2>/dev/null | wc -l) uncommitted file(s) at sync time"
 
+# BindingGYM's raw benchmark data comes from the shared store, not from this branch (skill §5):
+# it is fixed, public, identical across branches and 1.2 GB. bindinggym_dataset.py reads this
+# env var; unset, it falls back to the in-branch ./data/input.
+export BINDINGGYM_INPUT=/data/guoj0f/share/BindingGYM/input
+test -d "$BINDINGGYM_INPUT/Binding_substitutions_DMS" || { echo "FATAL: shared BindingGYM data missing"; exit 1; }
+echo "[data] $BINDINGGYM_INPUT  ("$(ls $BINDINGGYM_INPUT/Binding_substitutions_DMS | wc -l)" DMS csv, "$(ls $BINDINGGYM_INPUT/structures | wc -l)" structures)"
+
 # Single A100 -- do NOT set CUDA_VISIBLE_DEVICES (skill §1).
 python - <<'PY'
 import torch, numpy, sklearn

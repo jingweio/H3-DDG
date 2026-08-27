@@ -28,8 +28,11 @@ python -V
 
 pip install -q torch==1.13.1+cu117 --extra-index-url https://download.pytorch.org/whl/cu117
 # pinned AFTER torch so nothing above can pull them forward
+# easydict is imported by common_utils/protein/parsers.py. It was missed on the first build --
+# I listed what the code "looked like" it needed instead of diffing against the local env, and the
+# run died at import 20 s in. Diff the envs (pip list --format=freeze) rather than curating a list.
 pip install -q "numpy==1.22.4" "pandas==1.5.3" "scikit-learn==1.2.1" "scipy==1.13.1" \
-    "biopython==1.81" tqdm
+    "biopython==1.81" "easydict==1.13" tqdm
 
 echo "=== verification ==="
 python - <<'PY'

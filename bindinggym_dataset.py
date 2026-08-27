@@ -7,16 +7,34 @@ The fold assignment is READ from `data_splits/inter_assay_folds.tsv`, never reco
 
 `MPNNPaddingCollate` is reused unmodified from the SKEMPI path.
 """
+import os
+
 import torch
 from torch.utils.data import DataLoader
 
 from bindinggym import BindingGYMDataset
 from dataset import MPNNPaddingCollate, inf_iterator
 
+# BindingGYM's raw benchmark data lives in the shared store, not in the branch. It is fixed,
+# public, identical across every branch and 1.2 GB -- exactly the "common across branches AND
+# very large" case the workstation/ibex skills carve out as the exception to per-branch data
+# locality. Keeping a copy per worktree wasted GB and, worse, allowed two copies to drift.
+#   local       /home/guoj0f/share/BindingGYM/input
+#   workstation /data/guoj0f/share/BindingGYM/input
+#   ibex        /ibex/user/guoj0f/share/BindingGYM/input
+# Referenced through an env var rather than a hardcoded path, per the skills' §5. The fallback
+# keeps older invocations working unchanged.
+BINDINGGYM_INPUT = os.environ.get('BINDINGGYM_INPUT', './data/input')
+
+# NOT from the shared store, deliberately:
+#   folds_tsv / sides_tsv -- OUR artifacts, committed to git and version-guarded
+#   cache_dir             -- OUR derived cache, whose validity depends on this branch's parsing
+#                            code and sides table; sharing it would let a stale cache leak across
+#                            branches that changed either.
 DEFAULTS = dict(
-    dms_dir='./data/input/Binding_substitutions_DMS',
-    structure_dir='./data/input/structures',
-    mapping_csv='./data/input/BindingGYM.csv',
+    dms_dir=os.path.join(BINDINGGYM_INPUT, 'Binding_substitutions_DMS'),
+    structure_dir=os.path.join(BINDINGGYM_INPUT, 'structures'),
+    mapping_csv=os.path.join(BINDINGGYM_INPUT, 'BindingGYM.csv'),
     folds_tsv='./data_splits/inter_assay_folds.tsv',
     sides_tsv='./data_splits/assay_chain_sides.tsv',
     cache_dir='./data/BindingGYM_cache',
