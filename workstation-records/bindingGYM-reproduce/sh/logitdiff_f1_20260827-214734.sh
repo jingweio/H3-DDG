@@ -21,7 +21,8 @@ echo "[dirty]         $(tail -n +2 .synced_commit 2>/dev/null | wc -l) uncommitt
 
 # BindingGYM's raw benchmark data comes from the shared store, not from this branch (skill §5):
 # it is fixed, public, identical across branches and 1.2 GB. bindinggym_dataset.py reads this
-# env var; unset, it falls back to the in-branch ./data/input.
+# env var. The in-branch ./data/input fallback no longer exists -- it was a byte-identical
+# duplicate (73/73 md5) and was deleted, so this export is load-bearing, not a convenience.
 export BINDINGGYM_INPUT=/data/guoj0f/share/BindingGYM/input
 test -d "$BINDINGGYM_INPUT/Binding_substitutions_DMS" || { echo "FATAL: shared BindingGYM data missing"; exit 1; }
 echo "[data] $BINDINGGYM_INPUT  ("$(ls $BINDINGGYM_INPUT/Binding_substitutions_DMS | wc -l)" DMS csv, "$(ls $BINDINGGYM_INPUT/structures | wc -l)" structures)"
@@ -41,9 +42,10 @@ PY
 echo "--- GPU occupancy at launch ---"
 nvidia-smi --query-gpu=memory.used,memory.free --format=csv,noheader
 nvidia-smi --query-compute-apps=pid,used_memory,process_name --format=csv,noheader
-df -h /data | tail -1
+df -h /home /data | tail -2
 
-# Outputs live on /data (checkpoints ~28 MB x 5 + OOF csv); /home is 98% full.
+# Outputs stay in the worktree: ~28 MB x 5 checkpoints + one resume point + 5 OOF csvs, a few
+# hundred MB total. Well inside the 5 GB /home threshold (skill 2), so no split-tree needed.
 SAVE_DIR="$ROOT/results/bindinggym_logitdiff_fold1"
 mkdir -p "$SAVE_DIR"
 
