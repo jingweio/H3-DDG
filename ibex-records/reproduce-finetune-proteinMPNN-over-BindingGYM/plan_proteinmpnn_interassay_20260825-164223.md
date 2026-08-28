@@ -169,3 +169,31 @@ batch 乱抽。
   `train_fold3.log` **归档**到 `results/_archived_pmpnn_ensemble5_20260828/`（未删）。新 PID **81495**。
 - 启动断言踩过一次坑：`find .` 递归把归档里的 `resume_fold3.pt` 当成活状态而拒绝启动。已改成
   排除 `_archived*`，并把归档移出训练树 —— 递归检查保留，它本来就该抓到任何位置的活状态。
+
+### fold 3 完成（2026-08-29 02:49，workstation PID 81495，`EVAL_ENSEMBLE=1`）
+patience-3 早停于 **ep7**，best 在 **ep4**（pooled valid_spearman 0.537918）。5h32m 跑完 8 个 epoch
+（约 43 min/epoch，对比 ensemble=5 时的 3.4 h/epoch）。
+
+逐 epoch（pooled）：
+```
+ep0 0.459567(零样本)  ep1 0.446486 NIE1  ep2 0.477360  ep3 0.533826
+ep4 0.537918(best)    ep5 0.471995 NIE1  ep6 0.534487 NIE2  ep7 0.510092 NIE3 -> STOP
+```
+
+BindingGYM 官方口径 per-DMS（从 5 个 `*_oof.csv` 复算）：
+
+| assay | n | Spearman | AUC |
+|---|---|---|---|
+| SARS2-RBD_ACE2_deltaKd_6M0J | 21,872 | 0.7091 | 0.8527 |
+| GB1_IgG-Fc_fitness_1FCC | 92,891 | 0.5798 | 0.7203 |
+| CD19_FMC63_Fitness_7URV | 3,886 | 0.5664 | 0.7116 |
+| GB1_IgG-Fc_fitness_1FCC_2016 | 22,176 | 0.4955 | 0.7613 |
+| 4D5_HER2_fitness_1N8Z | 2,080 | 0.3389 | 0.8320 |
+| **per-DMS mean** | | **0.5379** | **0.7756** |
+
+**对官方 fold 3 参照 0.5550：达到 96.9%**（0.5379 vs 0.5550，差 0.017）。是目前三个完成 fold 里
+与官方最接近的一个。注意本 fold 用 `EVAL_ENSEMBLE=1`，官方与我们的 f1/f2 用 5 —— 见上方口径 NOTE。
+
+**ensemble=1 的方差实测**：同一零样本模型、同一 held-out 集，ep0 在 ensemble=5 下是 **0.513917**，
+在 ensemble=1 下是 **0.459567**，差 **0.054**。这是单个解码顺序相对 5 次平均的抽样偏离，量级不小，
+是解释 f0/f3/f4 与 f1/f2 差异时必须计入的一项。
