@@ -14,6 +14,9 @@
 # So this job runs main_f0_fast.py instead of main.py -- same file with two knobs added:
 #   EVAL_EVERY = 3   evaluate every 3rd epoch rather than every epoch
 #   STOP_AT   = 0.52 stop as soon as the held-out pooled Spearman reaches it
+#   EVAL_ENSEMBLE = 1 score the held-out set once per eval instead of upstream's five times
+#                     (upstream averages five ProteinMPNN decoding orders; that averaging is
+#                      ~80% of the wall clock). Folds 1/2 were produced with the upstream 5.
 # Everything else -- data, split, optimiser, loss, sampler, seed -- is untouched upstream.
 #
 # Disclose when reporting: fold 0's checkpoint is then chosen by "first to cross 0.52", while
@@ -50,9 +53,10 @@ test -s ./cache/BindingGYM_cluster.tsv || { echo "FATAL: missing cluster table";
 test -d ../input/Binding_substitutions_DMS || { echo "FATAL: missing DMS data"; exit 1; }
 test -s ./output/train_on_BindingGYM_${TMP}_seed42/resume_fold0.pt || {
   echo "FATAL: no fold-0 resume state; refusing to silently restart from scratch"; exit 1; }
-grep -q 'EVAL_EVERY = 3' main_f0_fast.py && grep -q 'STOP_AT = 0.52' main_f0_fast.py || {
+grep -q 'EVAL_EVERY = 3' main_f0_fast.py && grep -q 'STOP_AT = 0.52' main_f0_fast.py \
+  && grep -q 'EVAL_ENSEMBLE = 1' main_f0_fast.py || {
   echo "FATAL: main_f0_fast.py is not the patched variant"; exit 1; }
-echo "[ok] resuming fold 0 with EVAL_EVERY=3, STOP_AT=0.52"
+echo "[ok] resuming fold 0 with EVAL_EVERY=3, STOP_AT=0.52, EVAL_ENSEMBLE=1"
 
 srun python main_f0_fast.py \
   --train_dms_mapping ../input/BindingGYM.csv \

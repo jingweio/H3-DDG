@@ -111,27 +111,6 @@ import hashlib
 EVAL_ENSEMBLE = 1
 
 
-# ============================================================================================
-# TEMPORARY, SINGLE-USE VARIANT OF main.py -- fold 0 only.  DO NOT reuse, do not merge back.
-#
-# Fold 0 holds out 114,341 rows and scoring them dominates the epoch cost, so on Ibex it managed
-# exactly one epoch per 3:30 slot and TIMEOUT'd twice. This variant makes two changes:
-#   (1) evaluate only every EVAL_EVERY epochs instead of every epoch;
-#   (2) stop as soon as the held-out pooled Spearman reaches STOP_AT.
-#
-# Consequence to disclose when reporting: fold 0's checkpoint is then chosen by "first to cross
-# STOP_AT", whereas folds 1-4 use upstream's patience-3 best. Different selection rules, so the
-# fold-0 number is a reproducibility check, not a like-for-like entry in the per-fold table.
-#
-# Note on correctness of the OOF: best_valid_pred is only assigned inside the improvement branch.
-# STOP_AT (0.52) is above fold 0's current best (0.489961), so the epoch that trips the threshold
-# is necessarily an improvement and assigns best_valid_pred immediately before the break -- the
-# OOF csv is written from the right predictions. Skipped-eval epochs still persist resume state.
-# ============================================================================================
-EVAL_EVERY = 3
-STOP_AT = 0.52
-
-
 def generate_unique_id(string):
     # 创建一个哈希对象
     hash_object = hashlib.sha1()
@@ -572,26 +551,6 @@ if training:
                 
                 train_loss /= train_num
 
-            # TEMP: skip the (expensive) held-out scoring on 2 of every 3 epochs. Resume state is
-            # still persisted first, so a kill between evals costs at most one epoch of training.
-            if (epoch % EVAL_EVERY) != 0:
-                Write_log(log, '[epoch %s] lr: %.6f, train_loss: %.6f | eval skipped (EVAL_EVERY=%s)'
-                          % (epoch, optimizer.param_groups[0]['lr'], train_loss, EVAL_EVERY))
-                torch.save({'epoch': epoch,
-                            'model': model.module.state_dict() if len(gpus) > 1 else model.state_dict(),
-                            'optimizer': optimizer.state_dict(),
-                            'scheduler': scheduler.state_dict(),
-                            'best_model': best_model,
-                            'best_valid_metric': best_valid_metric,
-                            'best_valid_pred': best_valid_pred,
-                            'not_improve_epochs': not_improve_epochs,
-                            'rng_torch': torch.get_rng_state(),
-                            'rng_numpy': np.random.get_state(),
-                            'rng_cuda': torch.cuda.get_rng_state_all() if torch.cuda.is_available() else None,
-                            }, _tmp)
-                os.replace(_tmp, _state_path)
-                continue
-
             model.eval()
             if args.model_type == 'structure':
                 model.features.augment_eps = 0.
@@ -773,13 +732,6 @@ if training:
                         }, _tmp)
             os.replace(_tmp, _state_path)
 
-            # TEMP: threshold stop (see header). Fires on best-so-far, which is exactly what
-            # best_valid_pred was assigned from, so the OOF matches the reported number.
-            if best_valid_metric >= STOP_AT:
-                Write_log(log, '[STOP] fold%s: best valid spearman %.6f >= %.2f at epoch %s -- '
-                          'stopping (TEMPORARY single-use rule, not upstream patience-3)'
-                          % (fold, best_valid_metric, STOP_AT, epoch))
-                break
             if not_improve_epochs >= patience:
                 break
         if args.mode == 'intra':

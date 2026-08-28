@@ -112,3 +112,60 @@ StaB-ddG over SKEMPIv2），含实测证据，写在姊妹项目的记录里：
 - 2026-08-28 18:53: Ibex `50960860` pmpnn_f0fast 仍 PENDING，预估开始 **2026-08-31 06:22**（较上次的
   ~9 天提前到 ~3 天）。f0 用临时变体 main_f0_fast.py（EVAL_EVERY=3 / STOP_AT=0.52），选择规则与
   其余 fold 的 patience-3 不同。
+
+---
+
+## ⚠️ 口径 NOTE：f0/f3/f4 用 `EVAL_ENSEMBLE = 1`，f1/f2 用上游原值 5
+
+**这是 2026-08-28 用户批准的临时提速，必须在任何汇报里带上。**
+
+### 上游原本做什么
+ProteinMPNN 每次前向都要抽一个自回归解码顺序 —— `protein_mpnn_utils.py:1069-1072` 抽出
+`randn`，`:1097` 用 `argsort((chain_M+0.0001)*|randn|)` 把它变成 `decoding_order`。同一结构换个
+顺序，打出的分数就不同。
+
+`main.py:564-585` 因此在**每个 epoch 的验证**里跑 **5 遍**完整 held-out 集，每遍用一个新抽的
+解码顺序（`model.randn = None` 强制重抽），再 `valid_pred /= 5` 平均：
+
+```python
+if args.model_type == 'structure':
+    all_randn = [model.randn.clone()]
+    for _ in range(4):
+        model.randn = None          # 换一个解码顺序
+        ...完整扫一遍 held-out...
+        valid_pred += valid_pred1
+        all_randn.append(model.randn.clone())
+    valid_pred /= 5
+```
+
+这 5 个 order 被存进 `all_randn`，测试阶段（`:611`、`:636`）再复用，保证选模型与最终测试同序。
+
+**关键机制**：`if self.randn is None or self.training` —— 训练时每次 forward 都重抽（粒度是
+per-batch，因为 `randn` 形状 `(1, L)` 在 batch 内广播）；`model.eval()` 后走 else 分支复用缓存，
+所以**一次 pass 内全部 batch 共用一个 order**。ensemble 的 5 个成员是 5 个固定 order，不是每
+batch 乱抽。
+
+### 我们改了什么、为什么
+`EVAL_ENSEMBLE = 1`：只保留 1 个解码顺序，不做平均。
+
+成本实测：fold 3 held-out 142,905 行 = 17,864 个 batch，单遍约 40 min；一个 epoch 是
+**31 秒训练 + 5 × 40 min 验证 ≈ 3.4 h**，验证占 99%。整个 fold 3 约需 34–48 h，f3+f4 共 2–2.5 天。
+降到 1 后每 epoch 约 40 min。
+
+### 后果（汇报时必须说明）
+1. **f0/f3/f4 的 held-out 分数带单个解码顺序的方差**，不是 5 次平均；f1/f2 是 5 次平均。
+2. **可能选出不同的 epoch** —— patience-3 用的正是这个更抖的数，early stop 的触发点会变。
+3. 因此 **f0/f3/f4 与 f1/f2 不是严格同口径**，逐 fold 表并排时要标注。
+4. 这是**复现性检查**（能否大致复现官方量级），不是严格的跑数汇报。用户 2026-08-28 明确接受此取舍。
+
+### 变体与作业
+| 用途 | 文件 | 旋钮 |
+|---|---|---|
+| f0（Ibex） | `bgym_official/training/main_f0_fast.py` | `EVAL_ENSEMBLE=1`、`EVAL_EVERY=3`、`STOP_AT=0.52` |
+| f3/f4（workstation） | `bgym_official/training/main_ens1.py` | `EVAL_ENSEMBLE=1`（其余全同上游：每 epoch 评、patience-3） |
+
+- Ibex：`50960860` 取消（PENDING，无损失）→ **`50966710`** pmpnn_f0fast，24h。
+- workstation：ensemble=5 那轮（PID 3235074，跑了 7h、2 个 epoch）已 kill；其 `resume_fold3.pt` +
+  `train_fold3.log` **归档**到 `results/_archived_pmpnn_ensemble5_20260828/`（未删）。新 PID **81495**。
+- 启动断言踩过一次坑：`find .` 递归把归档里的 `resume_fold3.pt` 当成活状态而拒绝启动。已改成
+  排除 `_archived*`，并把归档移出训练树 —— 递归检查保留，它本来就该抓到任何位置的活状态。

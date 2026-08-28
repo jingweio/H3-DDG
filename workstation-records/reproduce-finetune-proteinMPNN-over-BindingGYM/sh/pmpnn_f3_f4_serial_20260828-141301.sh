@@ -31,8 +31,10 @@ test -s ./cache/BindingGYM_cluster.tsv || { echo "FATAL: missing cluster table";
 # excluded training/output and output), so assert that rather than trust it -- resuming fold 3
 # from fold 1's state would fail silently and produce a plausible wrong number.
 for f in 3 4; do
-  find . -name "resume_fold${f}.pt" -o -name "model${f}.ckpt" | grep -q . \
-    && { echo "FATAL: pre-existing state for fold ${f}"; exit 1; }
+  # Recursive on purpose -- live state anywhere under the tree must trip this. Archived runs
+  # (moved aside deliberately, e.g. the ensemble=5 attempt) live under _archived* and are exempt.
+  find . \( -name "resume_fold${f}.pt" -o -name "model${f}.ckpt" \) -not -path "*/_archived*" | grep -q . \
+    && { echo "FATAL: pre-existing live state for fold ${f}"; exit 1; }
 done
 echo "[clean] no pre-existing state for folds 3/4"
 
@@ -51,7 +53,7 @@ df -h /home | tail -1
 for FOLD in 3 4; do
   echo ""
   echo "=================== fold ${FOLD} start $(date '+%F %T') ==================="
-  python main.py \
+  python main_ens1.py \
     --train_dms_mapping "$IN/BindingGYM.csv" \
     --dms_input "$IN/Binding_substitutions_DMS" \
     --structure_path "$IN/structures" \
