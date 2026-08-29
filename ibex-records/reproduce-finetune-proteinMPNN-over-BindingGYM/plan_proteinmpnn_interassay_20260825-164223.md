@@ -229,3 +229,32 @@ ep0 0.392536(零样本)  ep1 0.404624(best)  ep2 0.365440 NIE1  ep3 0.378435 NIE
 （官方 25-assay 总平均 0.4217；缺的 fold 0 是官方最强的一折之一，0.5542。）
 
 ⚠️ f1/f2 用上游 `ensemble=5`，f3/f4 用 `ensemble=1` —— 见上方口径 NOTE。
+
+### fold 0 改用与其余 fold 相同的协议（2026-08-29 15:05，用户决定）
+
+**先取消了 Ibex。** `50966710` 八次排队读数在 16 小时里始终在 `08-30 21:08 .. 08-31 09:18` 之间
+摆动，没有单调前移，而 f0 实际只需数小时计算。已 `scancel`（`Elapsed 00:00:00`，无损失），
+Ibex 队列清空，f0 全部移到 workstation。
+
+**放弃 `EVAL_EVERY=3` 与 `STOP_AT=0.52`，改用 `main_ens1.py`** —— 就是 f3/f4 用的那个文件：
+上游原版 + 仅 `EVAL_ENSEMBLE=1`，每 epoch 评估、patience-3 早停。
+
+本机实测的三档成本（决定这个取舍的依据）：
+
+| 配置 | 单 epoch |
+|---|---|
+| 上游原版（ensemble=5，每 epoch 评） | 5 × 33 min + 31 s ≈ **2.8 h** |
+| ensemble=1，每 epoch 评 | 33 min + 31 s ≈ **34 min** |
+| ensemble=1 + `EVAL_EVERY=3` | ≈ **11.6 min**（摊薄） |
+
+**提速的 5 倍全部来自 ensemble，`EVAL_EVERY` 只是再叠的 3 倍。** 把这 3 倍还回去只多花
+6–8.5 h（patience-3 在 f1/f2/f3/f4 分别停在 ep14/10/7/4），换来的是**五折模型选择规则完全一致**：
+全部为「每 epoch 评 + patience-3」。整张表里唯一剩下的协议差异是 ensemble 1（f0/f3/f4）
+vs 5（f1/f2）。**f0 不再是「阈值停」的异类** —— 上面口径 NOTE 里关于「f0 选择规则不同」的
+那条至此作废，只剩 ensemble 一条差异。
+
+**从头跑，不用 Ibex 的 resume 状态**：其 `best_valid_metric = 0.489961` 是 ensemble=5 下测的，
+而 fold 3 实测该切换使同一模型偏移 −0.054；带进来会让后续 epoch 因协议差被判「未改善」，
+patience-3 可能停在假象上。省下的只有 ep0 一次评估（34 min），不值得。
+
+运行中：PID **2853142**，`sh/pmpnn_f0_ens1_patience3_20260829-150508.sh`，held-out 6 个 KRAS assay。
