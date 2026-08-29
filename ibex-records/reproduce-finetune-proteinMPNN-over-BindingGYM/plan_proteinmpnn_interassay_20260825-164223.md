@@ -258,3 +258,65 @@ vs 5（f1/f2）。**f0 不再是「阈值停」的异类** —— 上面口径 N
 patience-3 可能停在假象上。省下的只有 ep0 一次评估（34 min），不值得。
 
 运行中：PID **2853142**，`sh/pmpnn_f0_ens1_patience3_20260829-150508.sh`，held-out 6 个 KRAS assay。
+
+---
+
+# ✅ 复现完成（2026-08-29 20:21）—— 5/5 folds, 25/25 assays
+
+## 最终结果（BindingGYM 官方口径：per-DMS 等权平均）
+
+| | Spearman | AUC |
+|---|---|---|
+| 官方 Table 5（ProteinMPNN 微调） | 0.4217 | 0.6995 |
+| **我们复现** | **0.4387** | **0.7015** |
+| 达成 | **104.0%** | **100.3%** |
+
+## 逐 fold
+
+| fold | n | 官方 Sp | 我们 Sp | 达成 | 官方 AUC | 我们 AUC | 早停 | ensemble |
+|---|---|---|---|---|---|---|---|---|
+| 0 | 6 | 0.5542 | 0.5290 | 95.5% | 0.7328 | 0.7224 | ep8（best ep5） | 1 |
+| 1 | 5 | 0.2719 | **0.4132** | 152.0% | 0.6843 | 0.7515 | ep14（best ep11） | 5 |
+| 2 | 5 | 0.3035 | 0.2839 | 93.6% | 0.5669 | 0.5513 | ep10（best ep7） | 5 |
+| 3 | 5 | 0.5550 | 0.5379 | 96.9% | 0.8016 | 0.7756 | ep7（best ep4） | 1 |
+| 4 | 4 | 0.3916 | 0.4046 | 103.3% | 0.7066 | 0.7025 | ep4（best ep1） | 1 |
+
+四折落在 93.6–103.3%，f1 明显超出（152%）。总平均略高于官方，主要由 f1 贡献。
+
+## fold 0 明细（最后完成的一折）
+workstation PID 2853142，`main_ens1.py`，15:05:23 → 20:21:50（5h16m），patience-3 停于 ep8。
+
+```
+ep0 0.437692(零样本)  ep1 0.474082  ep2 0.480217  ep3 0.468486 NIE1
+ep4 0.489253          ep5 0.529022(best)  ep6 0.486236 NIE1  ep7 0.513333 NIE2  ep8 0.425195 NIE3 -> STOP
+```
+
+| assay | n | Spearman | AUC |
+|---|---|---|---|
+| KRAS_RALGDS-RBD_norfitness_1LFD | 20,341 | 0.6373 | 0.7253 |
+| KRAS_RAF1_norfitness_6VJJ | 12,677 | 0.6228 | 0.8012 |
+| KRAS_PICK3CG-RBD_norfitness_1HE8 | 19,203 | 0.5746 | 0.7416 |
+| KRAS_RAF1-RBD_norfitness_6VJJ | 23,162 | 0.5284 | 0.7009 |
+| KRAS_DARPinK27_norfitness_5O2S | 19,533 | 0.4200 | 0.6590 |
+| KRAS_SOS1_norfitness_8BE4 | 19,425 | 0.3911 | 0.7066 |
+| **per-DMS mean** | | **0.5290** | **0.7224** |
+
+## 口径说明（必须随结果一起引用）
+
+1. **模型选择规则五折一致**：全部为「每 epoch 评估 + 上游 patience-3」。早先给 f0 用过的
+   `EVAL_EVERY=3` / `STOP_AT=0.52` 变体已废弃，未用于最终结果。
+2. **唯一的协议差异是评估 ensemble**：f1/f2 用上游原值 5（在 Ibex 跑），f0/f3/f4 用 1
+   （在 workstation 跑）。上游每个 epoch 在 held-out 上用 5 个随机解码顺序各扫一遍再平均
+   （`main.py:564-585`），这占掉约 80% 的墙钟时间。
+   **实测该切换的影响**：同一零样本模型，fold 3 的 ep0 在 ensemble=5 下 0.513917、
+   ensemble=1 下 0.459567（差 0.054）；fold 0 的 ep0 分别是 0.458364 / 0.437692（差 0.021）。
+   所以 f0/f3/f4 的数字带单个解码顺序的方差，且 patience-3 在更抖的信号上选点，可能停在
+   不同的 epoch。**这是复现性检查的口径，不是严格的跑数汇报。**
+3. 数据、split、优化器、损失、采样器、seed 全部为上游原值，未改动。
+4. fold 归属读自固化的 `data_splits/inter_assay_folds.tsv`（指纹 d23e15f9…），从不现场重算。
+
+## 产出位置
+- checkpoints: workstation `bgym_official/training/output/train_on_BindingGYM_inter_cluster_structure_seed42/model{0,3,4}.ckpt`；
+  f1/f2 的 `model{1,2}.ckpt` 在 Ibex 同名目录
+- 逐 assay OOF: 同目录 `*_oof.csv`（workstation 15 个 / Ibex 10 个）
+- 逐 assay 指标汇总: `/tmp/final25.csv`
