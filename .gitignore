@@ -9,4 +9,10 @@ results/
 # ibex job logs
 ibex-records/**/*.out
 ibex-records/**/*.err
+# Same convention for the workstation: raw run logs stay on disk (local + remote), and the
+# substantive content -- per-epoch trajectories, early-stop points, per-assay metrics -- is
+# transcribed into the project's record md. The .err files are almost entirely tqdm progress
+# bars (73 MB for this project) and carry nothing the .out and the record do not.
+workstation-records/**/*.out
+workstation-records/**/*.err
 bgym_official/input/
