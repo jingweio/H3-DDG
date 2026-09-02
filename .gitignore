@@ -22,3 +22,7 @@ bgym_official/input/
 local-records/**/*.out
 local-records/**/*.err
 local-records/**/*.npz
+
+# T10 is 181,544 x 25 (28.7 MB) and downstream code reads the .csv from disk;
+# the .gz beside it is what gets versioned.
+local-records/**/T10_structure_pairs.csv

@@ -15,6 +15,8 @@ Pair-index arrays are ``int32`` (spec's numeric hygiene); code vectors are ``int
 """
 from __future__ import annotations
 
+import contextlib
+import fcntl
 import json
 import os
 import subprocess
@@ -467,30 +469,108 @@ def git_provenance():
     return dict(commit=head, dirty_files=dirty)
 
 
+#: Reserved top-level MANIFEST keys -- rebuilt on every write, never carried
+#: forward.  Everything else at top level is a stage's own provenance block
+#: (``latent``, ``structure``, ``variogram``, ``nulls``, ...) and IS carried
+#: forward, so a concurrent writer cannot drop another stage's block.
+_MANIFEST_RESERVED = ('schema', 'written_utc', 'env', 'env_observed', 'git',
+                      'seed_base', 'seeds', 'assay_ordinal', 'taus',
+                      'bindinggym_input', 'files')
+
+
+@contextlib.contextmanager
+def manifest_lock(timeout=120.0, poll=0.05):
+    """Exclusive ``flock`` serialising the MANIFEST read-modify-write.
+
+    Spec Sec.5 requires every cache file to be md5'd into ``MANIFEST.json``, and
+    every stage module writes into the SAME file.  ``write_manifest`` used to be
+    a bare replace, so two stage modules running concurrently could interleave
+    (A reads, B reads, A writes, B writes) and B's write would silently drop
+    every entry A had added -- observed losing entries in exactly that pattern.
+    The lock file lives beside the manifest and is never deleted (deleting it is
+    what makes lock files racy).
+    """
+    d = os.path.join(PATHS.cache, '.locks')
+    os.makedirs(d, exist_ok=True)
+    fh = open(os.path.join(d, 'manifest.lock'), 'a+')
+    t0 = time.time()
+    try:
+        while True:
+            try:
+                fcntl.flock(fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except OSError:
+                if time.time() - t0 > timeout:
+                    raise RuntimeError(
+                        'MANIFEST.json lock held for > %.0f s -- another writer '
+                        'is stuck; inspect %s' % (timeout, d))
+                time.sleep(poll)
+        fh.seek(0)
+        fh.truncate()
+        fh.write('pid %d  %s\n' % (os.getpid(),
+                                   time.strftime('%Y-%m-%dT%H:%M:%SZ',
+                                                 time.gmtime())))
+        fh.flush()
+        yield
+    finally:
+        try:
+            fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
+        finally:
+            fh.close()
+
+
 def write_manifest(entries, extra=None):
     """``data/cliff_cache/MANIFEST.json``: md5 of every cache file + env tuple +
     git commit + seeds (spec Sec.5).  Downstream code verifies the md5 before use
-    and refuses to run on a mismatch (:func:`verify_manifest`)."""
+    and refuses to run on a mismatch (:func:`verify_manifest`).
+
+    **Concurrency (D8).**  The whole read-modify-write is serialised by
+    :func:`manifest_lock`, and the ``files`` map is now a UNION of what is on
+    disk *inside the lock* with ``entries`` (``entries`` winning on a collision)
+    rather than a replacement.  Union, not replacement, is what makes the fix
+    complete: a caller that read the manifest BEFORE taking the lock (which is
+    what ``latent._update_manifest`` and ``structure._merge_manifest`` do) can no
+    longer drop an entry another writer added in between.  Non-reserved
+    top-level blocks are carried forward the same way.  The one thing this gives
+    up is the ability to REMOVE a stale entry through this function; nothing in
+    the pipeline does that, and :func:`verify_manifest` reports a missing file as
+    ``MISSING`` rather than silently passing.
+    """
     PATHS.ensure_cache_dirs()
-    man = dict(
-        schema='bgym-cliff-v1/MANIFEST',
-        written_utc=time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime()),
-        env=list(config.EXPECTED_ENV),
-        env_observed=list(config.assert_env()),
-        git=git_provenance(),
-        seed_base=config.SEED_BASE,
-        seeds=dict(SEEDS),
-        assay_ordinal=dict(config.ASSAY_ORDINAL),
-        taus=list(config.TAUS),
-        bindinggym_input=PATHS.bgym_input,
-        files={e['path']: {'md5': e['md5'], 'bytes': e['bytes']} for e in entries},
-    )
-    if extra:
-        man.update(extra)
-    tmp = PATHS.manifest + '.tmp'
-    with open(tmp, 'w') as fh:
-        json.dump(man, fh, indent=1, sort_keys=True)
-    os.replace(tmp, PATHS.manifest)
+    with manifest_lock():
+        on_disk_files, on_disk_extra = {}, {}
+        if os.path.exists(PATHS.manifest):
+            try:
+                with open(PATHS.manifest) as fh:
+                    prev = json.load(fh)
+                on_disk_files = prev.get('files', {}) or {}
+                on_disk_extra = {k: v for k, v in prev.items()
+                                 if k not in _MANIFEST_RESERVED}
+            except (ValueError, OSError):
+                on_disk_files, on_disk_extra = {}, {}
+        files = dict(on_disk_files)
+        files.update({e['path']: {'md5': e['md5'], 'bytes': e['bytes']}
+                      for e in entries})
+        man = dict(
+            schema='bgym-cliff-v1/MANIFEST',
+            written_utc=time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime()),
+            env=list(config.EXPECTED_ENV),
+            env_observed=list(config.assert_env()),
+            git=git_provenance(),
+            seed_base=config.SEED_BASE,
+            seeds=dict(SEEDS),
+            assay_ordinal=dict(config.ASSAY_ORDINAL),
+            taus=list(config.TAUS),
+            bindinggym_input=PATHS.bgym_input,
+            files=files,
+        )
+        man.update(on_disk_extra)
+        if extra:
+            man.update(extra)
+        tmp = '%s.tmp.%d' % (PATHS.manifest, os.getpid())
+        with open(tmp, 'w') as fh:
+            json.dump(man, fh, indent=1, sort_keys=True)
+        os.replace(tmp, PATHS.manifest)
     return man
 
 
