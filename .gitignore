@@ -16,3 +16,9 @@ ibex-records/**/*.err
 workstation-records/**/*.out
 workstation-records/**/*.err
 bgym_official/input/
+
+# local (workstation-less) analysis run logs: same convention as ibex-/workstation-records --
+# raw logs stay on disk, the substance is transcribed into the record md.
+local-records/**/*.out
+local-records/**/*.err
+local-records/**/*.npz

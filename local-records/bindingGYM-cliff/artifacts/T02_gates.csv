@@ -1,0 +1,56 @@
+gate_id,gate_name,assay,statistic,expected,observed,tolerance,PASS/FAIL,consequence_if_fail,halts_study
+G0,pre-flight benchmark: pair enumeration wall,GB1_IgG-Fc_fitness_1FCC,"enumeration wall (s), <= budget",180.0,0.55,budget,PASS,"switch to the n=40,000 x 5-subsample path; SI between-subsample SE must be <= 0.03 else INCONCLUSIVE",no
+G0,pre-flight benchmark: peak RSS,GB1_IgG-Fc_fitness_1FCC,"process peak-RSS high-water mark (GB) after this assay -- an UPPER BOUND on the per-assay figure, since ru_maxrss never decreases",4.0,1.478,budget,PASS,as above,no
+G0,pre-flight benchmark: pair enumeration wall,CR9114_FluAH1_logKd_4FQI,"enumeration wall (s), <= budget",180.0,1.58,budget,PASS,"switch to the n=40,000 x 5-subsample path; SI between-subsample SE must be <= 0.03 else INCONCLUSIVE",no
+G0,pre-flight benchmark: peak RSS,CR9114_FluAH1_logKd_4FQI,"process peak-RSS high-water mark (GB) after this assay -- an UPPER BOUND on the per-assay figure, since ru_maxrss never decreases",4.0,1.478,budget,PASS,as above,no
+G0,whole-benchmark enumeration wall,ALL_28,sum of per-assay enumeration wall (s),59.2,6.19,budget,PASS,runtime plan Sec.5 is wrong; re-price stage 0,no
+G0,whole-benchmark peak RSS,ALL_28,peak RSS (GB),2.0,1.478,budget,PASS,as above,no
+G0,fit_latent budget,GB1_IgG-Fc_fitness_1FCC,fit_latent 10 iterations (s),4.0,,budget,PENDING,subsample path,no
+G0,one null replicate budget,GB1_IgG-Fc_fitness_1FCC,one replicate (s),20.0,,budget,PENDING,subsample path,no
+G1,parse audit: rows,ALL_28,total rows,508962,508962,0,PASS,STOP -- the data is not what the profile describes,YES
+G1,parse audit: unique canonical keys,ALL_28,sum of per-file unique canonical keys,508962,508962,0,PASS,STOP -- the data is not what the profile describes,YES
+G1,parse audit: duplicate canonical keys,ALL_28,duplicate rows under the canonical key (chain retained),0,0,0,PASS,STOP -- the data is not what the profile describes,YES
+G1,parse audit: mutation instances (25 registered),REGISTERED_25,mutation tokens,1173273,1173273,0,PASS,STOP -- the data is not what the profile describes,YES
+G1,parse audit: mutation instances (all 28),ALL_28,mutation tokens; the spec quotes the 25-registered figure in the same line as the 28-file row count,2229197,2229197,0,PASS,STOP -- the data is not what the profile describes,YES
+G1,parse audit: mutated positions (25 registered),REGISTERED_25,"distinct (chain,resseq,icode) mutated positions",2220,2220,0,PASS,Sec.1.5 burial denominators change,no
+G1,"parse audit: wt-letter mismatches, mutant vs mutant_pdb",ALL_28,mismatching instances,0,0,0,PASS,STOP -- the data is not what the profile describes,YES
+G1,parse audit: wt-letter mismatches vs wildtype_sequence,ALL_28,mismatching instances,0,0,0,PASS,STOP -- the data is not what the profile describes,YES
+G1,parse audit: wt-letter mismatches vs PDB residue,REGISTERED_25,mismatching instances (22 PDBs; the 3 unregistered assays have no PDB in structures/),0,0,0,PASS,STOP -- the data is not what the profile describes,YES
+G1,parse audit: PDB residue keys not found,REGISTERED_25,"(chain,resseq,icode) absent from the PDB",0,0,0,PASS,mutant_pdb lookup is not a total function; map_mutations breaks,YES
+G1,parse audit: X-hits,ALL_28,mutations landing on an X of wildtype_sequence,0,0,0,PASS,STOP -- the data is not what the profile describes,YES
+G1,parse audit: * tokens,ALL_28,stop-codon tokens,0,0,0,PASS,STOP -- the data is not what the profile describes,YES
+G1,parse audit: identity mutations,ALL_28,tokens with wt == mut,0,0,0,PASS,STOP -- the data is not what the profile describes,YES
+G1,parse audit: per-chain token counts agree,ALL_28,mutant vs mutant_pdb per-chain token totals,True,True,0,PASS,STOP -- the data is not what the profile describes,YES
+G1,parse audit: mutated_sequence reconstruction,ALL_28,rows whose mutated_sequence does not rebuild from wildtype_sequence + mutant,0,0,0,PASS,Hamming != mutation-set distance; all pair work is invalid,YES
+G1,parse audit: indels,ALL_28,rows where len(mutated) != len(wildtype) on any chain,0,0,0,PASS,STOP -- the data is not what the profile describes,YES
+G1,parse audit: regex dict parser vs ast.literal_eval,ALL_28,disagreements over 1017924 dict strings,0,0,0,PASS,the fast parser is unsound; revert to ast.literal_eval,YES
+G1,HLA-A2 duplicated DMS_score column is identical,HLA-A2_TAPBPR_meanscore_5WER,rows differing between the two DMS_score columns,0,0,0,PASS,usecols silently picks one of two different scores,YES
+G1b,BH3 cross-assay join via mutant_seq + WT-residue identity,BH3_Bcl-xL_normed_1PQ1 x BH3_Mcl-1_normed_3KZ0,shared keys at the WT-consistent offset -2,518,518,0,PASS,the C4-I BH3 probe has no join,no
+G1b,BH3 cross-assay join via mutant_pdb + WT-residue identity,BH3_Bcl-xL_normed_1PQ1 x BH3_Mcl-1_normed_3KZ0,shared keys at the WT-consistent offset -84,518,518,0,PASS,the C4-I BH3 probe has no join,no
+G1b,"BH3 naive (pos,aa) join -- BANNED, measured to show why",BH3_Bcl-xL_normed_1PQ1 x BH3_Mcl-1_normed_3KZ0,"shared keys with NO offset, mutant numbering",97,97,0,PASS,n/a -- this row exists to document the banned route,no
+G1b,BH3 r disagreement resolved: Pearson,BH3_Bcl-xL_normed_1PQ1 x BH3_Mcl-1_normed_3KZ0,Pearson r on the 518/518 join,0.1709,0.1709,0.001,PASS,n/a,no
+G1b,BH3 r disagreement resolved: Spearman,BH3_Bcl-xL_normed_1PQ1 x BH3_Mcl-1_normed_3KZ0,Spearman rho on the SAME 518/518 join,0.592,0.5919,0.001,PASS,n/a,no
+G1b,BH3 seq-numbering offset,BH3 pair,3KZ0 chain C seq pos - 1PQ1 chain B seq pos,-2,-2,0,PASS,the -2 correction in Sec.2 is wrong,no
+G2,twin-assay shared keys,KRAS_SOS1_norfitness_8BE4 x KRAS_DARPinK27_norfitness_5O2S,shared keys (side0 token multiset),19227,19227,0,PASS,STOP -- the de-duplication premise has changed,YES
+G2,twin-assay byte identity,KRAS_SOS1_norfitness_8BE4 x KRAS_DARPinK27_norfitness_5O2S,max|Delta| on the raw score STRINGS,0.0,0.0,0,PASS,STOP -- the de-duplication premise has changed,YES
+G2,twin-assay raw-string differences,KRAS_SOS1_norfitness_8BE4 x KRAS_DARPinK27_norfitness_5O2S,shared keys whose DMS_score strings differ byte-for-byte,0,0,0,PASS,STOP -- the de-duplication premise has changed,YES
+G3,chain-key integrity: duplicates WITH the chain label,Z-domain_ZSPA-1_LL1_fitness_1LP1,duplicate genotypes (canonical key),0,0,0,PASS,the within-genotype SDs are REAL and become the primary noise floor for this assay,no
+G3,chain-key integrity: duplicates WITHOUT the chain label,Z-domain_ZSPA-1_LL1_fitness_1LP1,"duplicate genotypes keyed on (seq_pos,wt_aa,mut_aa)",847,847,0,PASS,the chain-collision diagnosis is wrong,no
+G3,chain-key integrity: duplicates WITH the chain label,Z-domain_ZSPA-1_LL2_fitness_1LP1,duplicate genotypes (canonical key),0,0,0,PASS,the within-genotype SDs are REAL and become the primary noise floor for this assay,no
+G3,chain-key integrity: duplicates WITHOUT the chain label,Z-domain_ZSPA-1_LL2_fitness_1LP1,"duplicate genotypes keyed on (seq_pos,wt_aa,mut_aa)",59,59,0,PASS,the chain-collision diagnosis is wrong,no
+G3,chain-key integrity: duplicates WITH the chain label,Z-domain_ZpA963_HL1_fitness_2M5A,duplicate genotypes (canonical key),0,0,0,PASS,the within-genotype SDs are REAL and become the primary noise floor for this assay,no
+G3,chain-key integrity: duplicates WITHOUT the chain label,Z-domain_ZpA963_HL1_fitness_2M5A,"duplicate genotypes keyed on (seq_pos,wt_aa,mut_aa)",650,650,0,PASS,the chain-collision diagnosis is wrong,no
+G3,chain-key integrity: duplicates WITH the chain label,Z-domain_ZpA963_HL2_fitness_2M5A,duplicate genotypes (canonical key),0,0,0,PASS,the within-genotype SDs are REAL and become the primary noise floor for this assay,no
+G3,chain-key integrity: duplicates WITHOUT the chain label,Z-domain_ZpA963_HL2_fitness_2M5A,"duplicate genotypes keyed on (seq_pos,wt_aa,mut_aa)",38,38,0,PASS,the chain-collision diagnosis is wrong,no
+G4,null self-calibration: T(tau) = 1.00 +/- 0.05 on a held-out N1,PRIMARY+ARM,"T(tau) over 199 N1 surrogates, tolerance +/-0.05",1.0,,,PENDING,STOP -- the surrogate machinery is biased; no observed number is readable,YES
+G4,null self-calibration: 200 empirical p-values uniform,PRIMARY+ARM,KS p,>0.05,,,PENDING,as above,YES
+G5,censoring positive control: unmasked T(4),CR9114_FluAH3_logKd_4FQY,T(4) unmasked,>=5,,,PENDING,STOP -- the pipeline cannot tell a detection limit from a cliff,YES
+G5,censoring positive control: |P_a| collapse after floor masking,CR9114_FluAH3_logKd_4FQY,|P_a| after masking,<=52000,,,PENDING,as above,YES
+G6,anti-smooth negative control: C1 REFUTED and T(4) inside the N2 band,Z-domain_ZSPA-1_LL1_fitness_1LP1 / LL2,verdict_C1 and T(4),REFUTED / inside,,,PENDING,STOP -- the pipeline is fooled by selection-dependent library membership,YES
+G7,scale-mixture discrimination: does N2c inflate TR / T(tau)?,PRIMARY+ARM,TR and T(tau) on 200 N2c surrogates,sets the verdict rule,,,PENDING,if localisation is ALSO inflated under N2c -> STOP,YES
+G8,"power & bias: detection power at a = 4 sigma, pi = 0.005",6 representative assays,power,>=0.5,,,PENDING,the assay is stamped UNDERPOWERED and reports INCONCLUSIVE,no
+G9,aggregate-rule FPR of the k-of-7 rule,50 N1 datasets,family-level FPR,<=0.1,,,PENDING,tighten k until <= 0.10 and record the change before any observed value,no
+G10,censoring-mask composition (order x degree-decile x phi-decile),censored assays,max absolute bin-proportion difference,<=0.02,,,PENDING,the clamp replay in the null is mis-specified; flag every claim as conditional,no
+G11,twin-structure control: at most ONE KRAS interface can be causal,KRAS_SOS1_norfitness_8BE4 / KRAS_DARPinK27_norfitness_5O2S,OR at 8BE4 vs OR at 5O2S,not both,,,PENDING,"reported as a finding, not a stop",no
+G-UP,optional upstream per-variant SE arm,SARS2-RBD / GB1 / CR9114,per-variant SE or read counts obtained,obtained,,,PENDING,"every C3-N verdict is stamped conditional and the record must say ""effect size relative to one contaminated replicate bound, not a calibrated significance""",no
+G-OPT,optional structural recovery for the hypercube arm,CR9114_FluAH1_logKd_4FQI / 4FQY / CR6261,4FQI/4FQY/3GBN fetched and the 16/11 somatic sites mapped at 100%,100%,,,PENDING,skip the structural half of the arm and say so; NEVER substitute a constant offset,no
